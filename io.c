@@ -46,6 +46,41 @@
 #define sys_pwrite64	sys_pwrite
 #endif
 
+#include <assert.h>
+
+extern int dumpfd, fusefd;
+static char *dumpbuf = NULL;
+static size_t dumpbufsize = 8192;
+
+static void
+initdumpbuf(size_t size)
+{
+	if (!dumpbuf)
+		assert( dumpbuf = malloc(dumpbufsize) );
+	if (size > dumpbufsize) {
+		assert( dumpbuf = realloc(dumpbuf, size) );
+		dumpbufsize = size;
+	}
+}
+
+static void
+printmark(struct tcb *tcp, char mark)
+{
+	if (dumpfd != -1 && tcp->u_arg[0] == fusefd)
+		assert( write(dumpfd, &mark, 1) == 1 );
+}
+
+static void
+dumpfuseio(struct tcb *tcp, long addr, size_t size)
+{
+	if (dumpfd != -1 && tcp->u_arg[0] == fusefd) {
+		initdumpbuf(size);
+
+		assert( umoven(tcp, addr, size, dumpbuf) == 0 );
+		assert( write(dumpfd, dumpbuf, size) == size );
+	}
+}
+
 int
 sys_read(tcp)
 struct tcb *tcp;
@@ -55,8 +90,11 @@ struct tcb *tcp;
 	} else {
 		if (syserror(tcp))
 			tprintf("%#lx", tcp->u_arg[1]);
-		else
+		else {
 			printstr(tcp, tcp->u_arg[1], tcp->u_rval);
+			printmark(tcp, 'R');
+			dumpfuseio(tcp, tcp->u_arg[1], tcp->u_rval);
+		}
 		tprintf(", %lu", tcp->u_arg[2]);
 	}
 	return 0;
@@ -69,6 +107,8 @@ struct tcb *tcp;
 	if (entering(tcp)) {
 		tprintf("%ld, ", tcp->u_arg[0]);
 		printstr(tcp, tcp->u_arg[1], tcp->u_arg[2]);
+		printmark(tcp, 'W');
+		dumpfuseio(tcp, tcp->u_arg[1], tcp->u_arg[2]);
 		tprintf(", %lu", tcp->u_arg[2]);
 	}
 	return 0;
@@ -76,10 +116,11 @@ struct tcb *tcp;
 
 #if HAVE_SYS_UIO_H
 void
-tprint_iov(tcp, len, addr)
+tprint_iov(tcp, len, addr, do_dumpfuse)
 struct tcb * tcp;
 unsigned long len;
 unsigned long addr;
+int do_dumpfuse;
 {
 #if defined(LINUX) && SUPPORTED_PERSONALITIES > 1
 	union {
@@ -136,6 +177,8 @@ unsigned long addr;
 		}
 		tprintf("{");
 		printstr(tcp, (long) iov_iov_base, iov_iov_len);
+		if (do_dumpfuse)
+			dumpfuseio(tcp, (long) iov_iov_base, iov_iov_len);
 		tprintf(", %lu}", (unsigned long)iov_iov_len);
 	}
 	tprintf("]");
@@ -158,7 +201,8 @@ struct tcb *tcp;
 					tcp->u_arg[1], tcp->u_arg[2]);
 			return 0;
 		}
-		tprint_iov(tcp, tcp->u_arg[2], tcp->u_arg[1]);
+		printmark(tcp, 'R');
+		tprint_iov(tcp, tcp->u_arg[2], tcp->u_arg[1], 1);
 		tprintf(", %lu", tcp->u_arg[2]);
 	}
 	return 0;
@@ -170,7 +214,8 @@ struct tcb *tcp;
 {
 	if (entering(tcp)) {
 		tprintf("%ld, ", tcp->u_arg[0]);
-		tprint_iov(tcp, tcp->u_arg[2], tcp->u_arg[1]);
+		printmark(tcp, 'W');
+		tprint_iov(tcp, tcp->u_arg[2], tcp->u_arg[1], 1);
 		tprintf(", %lu", tcp->u_arg[2]);
 	}
 	return 0;

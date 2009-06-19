@@ -45,6 +45,7 @@
 #include <string.h>
 #include <limits.h>
 #include <dirent.h>
+#include <assert.h>
 
 #ifdef LINUX
 # include <asm/unistd.h>
@@ -677,6 +678,8 @@ startup_child (char **argv)
 #endif /* USE_PROCFS */
 }
 
+int dumpfd = -1;
+
 int
 main(int argc, char *argv[])
 {
@@ -686,6 +689,13 @@ main(int argc, char *argv[])
 	struct sigaction sa;
 
 	static char buf[BUFSIZ];
+	char *sdfil;
+
+	sdfil = getenv("FUSE_DUMPFILE");
+	if (sdfil) {
+		dumpfd = open(sdfil, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+		assert( dumpfd != -1 );
+	}
 
 	progname = argv[0] ? argv[0] : "strace";
 
