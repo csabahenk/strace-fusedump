@@ -404,6 +404,7 @@ struct tcb {
 #define QUAL_FAULT	0040	/* report events with this fault */
 #define QUAL_READ	0100	/* dump data read on this file descriptor */
 #define QUAL_WRITE	0200	/* dump data written to this file descriptor */
+#define QUAL_FUSE	0400	/* dump I/O on /dev/fuse */
 
 #define entering(tcp)	(!((tcp)->flags & TCB_INSYSCALL))
 #define exiting(tcp)	((tcp)->flags & TCB_INSYSCALL)

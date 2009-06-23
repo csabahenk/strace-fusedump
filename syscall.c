@@ -38,6 +38,8 @@
 #include <signal.h>
 #include <time.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <assert.h>
 #include <sys/user.h>
 #include <sys/syscall.h>
 #include <sys/param.h>
@@ -249,7 +251,7 @@ set_personality(int personality)
 }
 
 
-static int qual_syscall(), qual_signal(), qual_fault(), qual_desc();
+static int qual_syscall(), qual_signal(), qual_fault(), qual_desc(), qual_fuse();
 
 static const struct qual_options {
 	int bitflag;
@@ -277,6 +279,9 @@ static const struct qual_options {
 	{ QUAL_WRITE,	"write",	qual_desc,	"descriptor"	},
 	{ QUAL_WRITE,	"writes",	qual_desc,	"descriptor"	},
 	{ QUAL_WRITE,	"w",		qual_desc,	"descriptor"	},
+	{ QUAL_FUSE,	"fusedump",	qual_fuse,	"fusedump"	},
+	{ QUAL_FUSE,	"fuse",		qual_fuse,	"fusedump"	},
+	{ QUAL_FUSE,	"F",		qual_fuse,	"fusedump"	},
 	{ 0,		NULL,		NULL,		NULL		},
 };
 
@@ -410,6 +415,23 @@ qual_desc(s, opt, not)
 	}
 	return -1;
 }
+
+int dumpfd = -1;
+
+static int
+qual_fuse(s, opt, not)
+	char *s;
+	const struct qual_options *opt;
+	int not;
+{
+	if (!not) {
+		dumpfd = open(s, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+		assert( dumpfd != -1 );
+	}
+
+	return 0;
+}
+
 
 static int
 lookup_class(s)

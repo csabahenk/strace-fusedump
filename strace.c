@@ -45,7 +45,6 @@
 #include <string.h>
 #include <limits.h>
 #include <dirent.h>
-#include <assert.h>
 
 #ifdef LINUX
 # include <asm/unistd.h>
@@ -187,7 +186,7 @@ usage: strace [-dffhiqrtttTvVxx] [-a column] [-e expr] ... [-o file]\n\
 -x -- print non-ascii strings in hex, -xx -- print all strings in hex\n\
 -a column -- alignment COLUMN for printing syscall results (default %d)\n\
 -e expr -- a qualifying expression: option=[!]all or option=[!]val1[,val2]...\n\
-   options: trace, abbrev, verbose, raw, signal, read, or write\n\
+   options: trace, abbrev, verbose, raw, signal, read, write, or fusedump\n\
 -o file -- send trace output to FILE instead of stderr\n\
 -O overhead -- set overhead for tracing syscalls to OVERHEAD usecs\n\
 -p pid -- trace process with process id PID, may be repeated\n\
@@ -678,8 +677,6 @@ startup_child (char **argv)
 #endif /* USE_PROCFS */
 }
 
-int dumpfd = -1;
-
 int
 main(int argc, char *argv[])
 {
@@ -689,12 +686,12 @@ main(int argc, char *argv[])
 	struct sigaction sa;
 
 	static char buf[BUFSIZ];
-	char *sdfil;
 
-	sdfil = getenv("FUSE_DUMPFILE");
-	if (sdfil) {
-		dumpfd = open(sdfil, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-		assert( dumpfd != -1 );
+	if (getenv("FUSE_DUMPFILE")) {
+		fprintf(stderr,
+		        "The env. var. FUSE_DUMPFILE is not supported anymore.\n"
+		        "Use instead \"-eF=<dumpfile>\" or \"-efusedump=<dumpfile>\"\n.");
+		exit(1);
 	}
 
 	progname = argv[0] ? argv[0] : "strace";
