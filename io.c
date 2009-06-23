@@ -64,31 +64,38 @@ initdumpbuf(size_t size)
 }
 
 static int
-check_fuse(struct tcb *tcp)
+check_fuse(struct tcb *tcp, int *fdcond)
 {
 	struct stat st;
 	char ppath[128];
 	int rv;
 
-	if (dumpfd == -1 || tcp->u_arg[0] != fusefd)
+	if (*fdcond >= 0)
+		return *fdcond;
+	if (dumpfd == -1 || tcp->u_arg[0] != fusefd) {
+		*fdcond = 0;
+
 		return 0;
+	}
 
 	snprintf(ppath, sizeof(ppath), "/proc/%d/fd/%d", tcp->pid, fusefd);
 	rv = stat(ppath, &st);
-	return (rv == 0 && st.st_rdev == 0xae5 /* makedev(10, 229) */ );
+	*fdcond = (rv == 0 && st.st_rdev == 0xae5 /* makedev(10, 229) */ );
+
+	return *fdcond;
 }
 
 static void
-printmark(struct tcb *tcp, char mark)
+printmark(struct tcb *tcp, char mark, int *fdcond)
 {
-	if (check_fuse(tcp))
+	if (check_fuse(tcp, fdcond))
 		assert( write(dumpfd, &mark, 1) == 1 );
 }
 
 static void
-dumpfuseio(struct tcb *tcp, long addr, size_t size)
+dumpfuseio(struct tcb *tcp, long addr, size_t size, int *fdcond)
 {
-	if (check_fuse(tcp)) {
+	if (check_fuse(tcp, fdcond)) {
 		initdumpbuf(size);
 
 		assert( umoven(tcp, addr, size, dumpbuf) == 0 );
@@ -100,6 +107,8 @@ int
 sys_read(tcp)
 struct tcb *tcp;
 {
+	int fdcond = -1;
+
 	if (entering(tcp)) {
 		tprintf("%ld, ", tcp->u_arg[0]);
 	} else {
@@ -107,8 +116,8 @@ struct tcb *tcp;
 			tprintf("%#lx", tcp->u_arg[1]);
 		else {
 			printstr(tcp, tcp->u_arg[1], tcp->u_rval);
-			printmark(tcp, 'R');
-			dumpfuseio(tcp, tcp->u_arg[1], tcp->u_rval);
+			printmark(tcp, 'R', &fdcond);
+			dumpfuseio(tcp, tcp->u_arg[1], tcp->u_rval, &fdcond);
 		}
 		tprintf(", %lu", tcp->u_arg[2]);
 	}
@@ -119,11 +128,13 @@ int
 sys_write(tcp)
 struct tcb *tcp;
 {
+	int fdcond = -1;
+
 	if (entering(tcp)) {
 		tprintf("%ld, ", tcp->u_arg[0]);
 		printstr(tcp, tcp->u_arg[1], tcp->u_arg[2]);
-		printmark(tcp, 'W');
-		dumpfuseio(tcp, tcp->u_arg[1], tcp->u_arg[2]);
+		printmark(tcp, 'W', &fdcond);
+		dumpfuseio(tcp, tcp->u_arg[1], tcp->u_arg[2], &fdcond);
 		tprintf(", %lu", tcp->u_arg[2]);
 	}
 	return 0;
@@ -131,11 +142,11 @@ struct tcb *tcp;
 
 #if HAVE_SYS_UIO_H
 void
-tprint_iov(tcp, len, addr, do_dumpfuse)
+tprint_iov(tcp, len, addr, fdcond)
 struct tcb * tcp;
 unsigned long len;
 unsigned long addr;
-int do_dumpfuse;
+int *fdcond;
 {
 #if defined(LINUX) && SUPPORTED_PERSONALITIES > 1
 	union {
@@ -192,8 +203,7 @@ int do_dumpfuse;
 		}
 		tprintf("{");
 		printstr(tcp, (long) iov_iov_base, iov_iov_len);
-		if (do_dumpfuse)
-			dumpfuseio(tcp, (long) iov_iov_base, iov_iov_len);
+		dumpfuseio(tcp, (long) iov_iov_base, iov_iov_len, fdcond);
 		tprintf(", %lu}", (unsigned long)iov_iov_len);
 	}
 	tprintf("]");
@@ -208,6 +218,8 @@ int
 sys_readv(tcp)
 struct tcb *tcp;
 {
+	int fdcond = -1;
+
 	if (entering(tcp)) {
 		tprintf("%ld, ", tcp->u_arg[0]);
 	} else {
@@ -216,8 +228,8 @@ struct tcb *tcp;
 					tcp->u_arg[1], tcp->u_arg[2]);
 			return 0;
 		}
-		printmark(tcp, 'R');
-		tprint_iov(tcp, tcp->u_arg[2], tcp->u_arg[1], 1);
+		printmark(tcp, 'R', &fdcond);
+		tprint_iov(tcp, tcp->u_arg[2], tcp->u_arg[1], &fdcond);
 		tprintf(", %lu", tcp->u_arg[2]);
 	}
 	return 0;
@@ -227,10 +239,12 @@ int
 sys_writev(tcp)
 struct tcb *tcp;
 {
+	int fdcond = -1;
+
 	if (entering(tcp)) {
 		tprintf("%ld, ", tcp->u_arg[0]);
-		printmark(tcp, 'W');
-		tprint_iov(tcp, tcp->u_arg[2], tcp->u_arg[1], 1);
+		printmark(tcp, 'W', &fdcond);
+		tprint_iov(tcp, tcp->u_arg[2], tcp->u_arg[1], &fdcond);
 		tprintf(", %lu", tcp->u_arg[2]);
 	}
 	return 0;

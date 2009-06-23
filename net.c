@@ -1170,6 +1170,7 @@ struct tcb *tcp;
 long addr;
 {
 	struct msghdr msg;
+	int fdcond = 0;
 
 	if (umove(tcp, addr, &msg) < 0) {
 		tprintf("%#lx", addr);
@@ -1180,7 +1181,7 @@ long addr;
 
 	tprintf(", msg_iov(%lu)=", (unsigned long)msg.msg_iovlen);
 	tprint_iov(tcp, (unsigned long)msg.msg_iovlen,
-		   (unsigned long)msg.msg_iov, 0);
+		   (unsigned long)msg.msg_iov, &fdcond);
 
 #ifdef HAVE_STRUCT_MSGHDR_MSG_CONTROL
 	tprintf(", msg_controllen=%lu", (unsigned long)msg.msg_controllen);
