@@ -63,17 +63,32 @@ initdumpbuf(size_t size)
 	}
 }
 
+static int
+check_fuse(struct tcb *tcp)
+{
+	struct stat st;
+	char ppath[128];
+	int rv;
+
+	if (dumpfd == -1 || tcp->u_arg[0] != fusefd)
+		return 0;
+
+	snprintf(ppath, sizeof(ppath), "/proc/%d/fd/%d", tcp->pid, fusefd);
+	rv = stat(ppath, &st);
+	return (rv == 0 && st.st_rdev == 0xae5 /* makedev(10, 229) */ );
+}
+
 static void
 printmark(struct tcb *tcp, char mark)
 {
-	if (dumpfd != -1 && tcp->u_arg[0] == fusefd)
+	if (check_fuse(tcp))
 		assert( write(dumpfd, &mark, 1) == 1 );
 }
 
 static void
 dumpfuseio(struct tcb *tcp, long addr, size_t size)
 {
-	if (dumpfd != -1 && tcp->u_arg[0] == fusefd) {
+	if (check_fuse(tcp)) {
 		initdumpbuf(size);
 
 		assert( umoven(tcp, addr, size, dumpbuf) == 0 );
