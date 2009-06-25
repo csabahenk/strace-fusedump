@@ -48,7 +48,7 @@
 
 #include <assert.h>
 
-extern int dumpfd, fusefd;
+extern int dumpfd;
 static char *dumpbuf = NULL;
 static size_t dumpbufsize = 8192;
 
@@ -72,13 +72,13 @@ check_fuse(struct tcb *tcp, int *fdcond)
 
 	if (*fdcond >= 0)
 		return *fdcond;
-	if (dumpfd == -1 || tcp->u_arg[0] != fusefd) {
+	if (dumpfd == -1) {
 		*fdcond = 0;
 
 		return 0;
 	}
 
-	snprintf(ppath, sizeof(ppath), "/proc/%d/fd/%d", tcp->pid, fusefd);
+	snprintf(ppath, sizeof(ppath), "/proc/%d/fd/%ld", tcp->pid, tcp->u_arg[0]);
 	rv = stat(ppath, &st);
 	*fdcond = (rv == 0 && st.st_rdev == 0xae5 /* makedev(10, 229) */ );
 

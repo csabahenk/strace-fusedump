@@ -30,7 +30,6 @@
  *	$Id$
  */
 
-#include <assert.h>
 #include "defs.h"
 
 #ifdef LINUX
@@ -110,8 +109,6 @@ static const struct xlat mount_flags[] = {
 	{ 0,		NULL		},
 };
 
-int fusefd = -1;
-
 int
 sys_mount(struct tcb *tcp)
 {
@@ -147,22 +144,6 @@ sys_mount(struct tcb *tcp)
 			tprintf("%#lx", tcp->u_arg[4]);
 		else
 			printstr(tcp, tcp->u_arg[4], -1);
-
-		{
-			char buf[512], *s;
-
-			assert( umovestr(tcp, tcp->u_arg[2], 512, buf) == 0 );
-			if (strncmp(buf, "fuse", 4) == 0) {
-				assert( umovestr(tcp, tcp->u_arg[4], 512, buf) == 0 );
-				s = strtok(buf, ",");
-				for (s = strtok(buf, ","); s; s = strtok(NULL, ",")) {
-					if (strncmp(s, "fd=", 3) == 0) {
-						fusefd = strtoul(s + 3, NULL, 10);
-						break;
-					}
-				}
-			}
-		}
 	}
 	return 0;
 }

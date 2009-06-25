@@ -1109,9 +1109,6 @@ static const struct xlat scmvals[] = {
 	{ 0,			NULL			}
 };
 
-extern int fusefd;
-static int proposed_fusefd = -1;
-
 static void
 printcmsghdr(struct tcb *tcp, unsigned long addr, unsigned long len)
 {
@@ -1142,7 +1139,6 @@ printcmsghdr(struct tcb *tcp, unsigned long addr, unsigned long len)
 			while ((char *) fds < ((char *) cmsg + cmsg_len)) {
 				if (!first)
 					tprintf(", ");
-				proposed_fusefd = *fds;
 				tprintf("%d", *fds++);
 				first = 0;
 			}
@@ -1450,20 +1446,13 @@ int
 sys_recvmsg(tcp)
 struct tcb *tcp;
 {
-	static int setfusefd = 1;
-
 	if (entering(tcp)) {
 		tprintf("%ld, ", tcp->u_arg[0]);
 	} else {
 		if (syserror(tcp) || !verbose(tcp))
 			tprintf("%#lx", tcp->u_arg[1]);
-		else {
+		else
 			printmsghdr(tcp, tcp->u_arg[1]);
-			if (setfusefd && proposed_fusefd != -1) {
-				fusefd = proposed_fusefd;
-				setfusefd = 0;
-			}
-		}
 		/* flags */
 		tprintf(", ");
 		printflags(msg_flags, tcp->u_arg[2], "MSG_???");
