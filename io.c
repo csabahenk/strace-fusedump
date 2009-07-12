@@ -48,6 +48,8 @@
 
 #include <assert.h>
 
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+
 extern int dumpfd;
 static char *dumpbuf = NULL;
 static size_t dumpbufsize = 8192;
@@ -170,6 +172,7 @@ int *fdcond;
 #endif
 	unsigned long size, cur, end, abbrev_end;
 	int failed = 0;
+	int32_t fdsiz = -1;
 
 	if (!len) {
 		tprintf("[]");
@@ -203,7 +206,12 @@ int *fdcond;
 		}
 		tprintf("{");
 		printstr(tcp, (long) iov_iov_base, iov_iov_len);
-		dumpfuseio(tcp, (long) iov_iov_base, iov_iov_len, fdcond);
+		if (cur == addr && *fdcond && iov_iov_len >= sizeof(fdsiz))
+			assert( umoven(tcp, (long) iov_iov_base, sizeof(fdsiz), (char *) &fdsiz) == 0 );
+		if (fdsiz > 0) {
+			dumpfuseio(tcp, (long) iov_iov_base, MIN(iov_iov_len, fdsiz), fdcond);
+			fdsiz -= iov_iov_len;
+		}
 		tprintf(", %lu}", (unsigned long)iov_iov_len);
 	}
 	tprintf("]");
