@@ -188,8 +188,48 @@ static const struct xlat mmap_flags[] = {
 #ifdef MAP_NOCORE
 	{ MAP_NOCORE,		"MAP_NOCORE"	},
 #endif
+#ifdef TILE
+	{ MAP_CACHE_NO_LOCAL, "MAP_CACHE_NO_LOCAL" },
+	{ MAP_CACHE_NO_L2, "MAP_CACHE_NO_L2" },
+	{ MAP_CACHE_NO_L1, "MAP_CACHE_NO_L1" },
+#endif
 	{ 0,		NULL		},
 };
+
+#ifdef TILE
+static
+int
+addtileflags(flags)
+long flags;
+{
+	long home = flags & _MAP_CACHE_MKHOME(_MAP_CACHE_HOME_MASK);
+	flags &= ~_MAP_CACHE_MKHOME(_MAP_CACHE_HOME_MASK);
+
+	if (flags & _MAP_CACHE_INCOHERENT) {
+		flags &= ~_MAP_CACHE_INCOHERENT;
+		if (home == MAP_CACHE_HOME_NONE) {
+			tprintf("|MAP_CACHE_INCOHERENT");
+			return flags;
+		}
+		tprintf("|_MAP_CACHE_INCOHERENT");
+	}
+
+	switch (home) {
+	case 0:	break;
+	case MAP_CACHE_HOME_HERE: tprintf("|MAP_CACHE_HOME_HERE"); break;
+	case MAP_CACHE_HOME_NONE: tprintf("|MAP_CACHE_HOME_NONE"); break;
+	case MAP_CACHE_HOME_SINGLE: tprintf("|MAP_CACHE_HOME_SINGLE"); break;
+	case MAP_CACHE_HOME_TASK: tprintf("|MAP_CACHE_HOME_TASK"); break;
+	case MAP_CACHE_HOME_HASH: tprintf("|MAP_CACHE_HOME_HASH"); break;
+	default:
+		tprintf("|MAP_CACHE_HOME(%d)",
+			(home >> _MAP_CACHE_HOME_SHIFT) );
+		break;
+	}
+
+	return flags;
+}
+#endif
 
 #if !HAVE_LONG_LONG_OFF_T
 static
@@ -213,7 +253,11 @@ long long offset;
 		/* flags */
 #ifdef MAP_TYPE
 		printxval(mmap_flags, u_arg[3] & MAP_TYPE, "MAP_???");
+#ifdef TILE
+		addflags(mmap_flags, addtileflags(u_arg[3] & ~MAP_TYPE));
+#else
 		addflags(mmap_flags, u_arg[3] & ~MAP_TYPE);
+#endif
 #else
 		printflags(mmap_flags, u_arg[3], "MAP_???");
 #endif
@@ -318,7 +362,6 @@ struct tcb *tcp;
 			return 0;
 #endif /* ALPHA */
 #endif /* linux */
-		ALIGN64 (tcp, 5);	/* FreeBSD wierdies */
 
 		/* addr */
 		tprintf("%#lx, ", u_arg[0]);
@@ -337,7 +380,7 @@ struct tcb *tcp;
 		/* fd */
 		tprintf(", %ld, ", u_arg[4]);
 		/* offset */
-		tprintf("%#llx", LONG_LONG(u_arg[5], u_arg[6]));
+		printllval(tcp, "%#llx", 5);
 	}
 	return RVAL_HEX;
 }
@@ -371,17 +414,24 @@ struct tcb *tcp;
 
 static const struct xlat mremap_flags[] = {
 	{ MREMAP_MAYMOVE,	"MREMAP_MAYMOVE"	},
+#ifdef MREMAP_FIXED
+	{ MREMAP_FIXED,		"MREMAP_FIXED"		},
+#endif
 	{ 0,			NULL			}
 };
 
 int
-sys_mremap(tcp)
-struct tcb *tcp;
+sys_mremap(struct tcb *tcp)
 {
 	if (entering(tcp)) {
 		tprintf("%#lx, %lu, %lu, ", tcp->u_arg[0], tcp->u_arg[1],
 			tcp->u_arg[2]);
 		printflags(mremap_flags, tcp->u_arg[3], "MREMAP_???");
+#ifdef MREMAP_FIXED
+		if ((tcp->u_arg[3] & (MREMAP_MAYMOVE | MREMAP_FIXED)) ==
+		    (MREMAP_MAYMOVE | MREMAP_FIXED))
+			tprintf(", %#lx", tcp->u_arg[4]);
+#endif
 	}
 	return RVAL_HEX;
 }
@@ -660,6 +710,26 @@ struct tcb *tcp;
 }
 #endif /* LINUX && __i386__ */
 
+#if defined(LINUX) && defined(M68K)
+
+int
+sys_set_thread_area(tcp)
+struct tcb *tcp;
+{
+	if (entering(tcp))
+		tprintf("%#lx", tcp->u_arg[0]);
+	return 0;
+
+}
+
+int
+sys_get_thread_area(tcp)
+struct tcb *tcp;
+{
+	return RVAL_HEX;
+}
+#endif
+
 #if defined(LINUX)
 int
 sys_remap_file_pages(tcp)
@@ -773,7 +843,7 @@ sys_mbind(tcp)
 struct tcb *tcp;
 {
 	if (entering(tcp)) {
-		tprintf("%lu, %lu, ", tcp->u_arg[0], tcp->u_arg[1]);
+		tprintf("%#lx, %lu, ", tcp->u_arg[0], tcp->u_arg[1]);
 		printxval(policies, tcp->u_arg[2], "MPOL_???");
 		get_nodes(tcp, tcp->u_arg[3], tcp->u_arg[4], 0);
 		tprintf(", ");

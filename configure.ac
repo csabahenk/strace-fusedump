@@ -1,9 +1,10 @@
 dnl Process this file with autoconf to create configure.  Use autoreconf.
 AC_PREREQ(2.57)
-AC_INIT([strace],[4.5.18])
+AC_INIT([strace],[4.5.20])
 AC_CONFIG_SRCDIR([strace.c])
+AC_CONFIG_AUX_DIR([.])
 AM_CONFIG_HEADER([config.h])
-AM_INIT_AUTOMAKE([foreign check-news dist-bzip2])
+AM_INIT_AUTOMAKE([foreign check-news dist-bzip2 no-dist-gzip])
 AM_MAINTAINER_MODE
 AC_CANONICAL_HOST
 
@@ -78,6 +79,9 @@ alpha*)
 powerpc*)
 	arch=powerpc
 	AC_DEFINE([POWERPC], 1, [Define for the PowerPC architecture.])
+	if test $host_cpu = powerpc64; then
+		AC_DEFINE([POWERPC64], 1, [Define for the PowerPC64 architecture.])
+	fi
 	;;
 arm*)
 	arch=arm
@@ -118,6 +122,14 @@ cris|crisv10)
 crisv32)
 	arch=crisv32
 	AC_DEFINE([CRISV32], 1, [Define for the CRISv32 architecture.])
+	;;
+tile*)
+	arch=tile
+	AC_DEFINE([TILE], 1, [Define for the Tile architecture])
+	;;
+microblaze*)
+	arch=microblaze
+	AC_DEFINE([MICROBLAZE], 1, [Define for the MicroBlaze architecture.])
 	;;
 *)
 	AC_MSG_RESULT([NO!])
@@ -186,6 +198,7 @@ AC_CHECK_MEMBERS([struct stat.st_blksize,
 		  struct stat.st_level,
 		  struct stat.st_rdev])
 AC_STAT64
+AC_STATFS64
 
 AC_TYPE_SIGNAL
 AC_TYPE_UID_T
@@ -208,7 +221,21 @@ if test x$opsys != xlinux; then
 AC_CHECK_LIB(nsl, main)
 fi
 
-AC_CHECK_FUNCS(sigaction strerror strsignal pread sys_siglist _sys_siglist getdents mctl prctl sendmsg inet_ntop if_indextoname)
+AC_CHECK_FUNCS([ \
+	fork \
+	getdents \
+	if_indextoname \
+	inet_ntop \
+	mctl \
+	prctl \
+	pread \
+	sendmsg \
+	sigaction \
+	strerror \
+	strsignal \
+	sys_siglist \
+	_sys_siglist \
+])
 AC_CHECK_HEADERS([ \
 	inttypes.h \
 	ioctls.h \
@@ -236,7 +263,6 @@ AC_CHECK_HEADERS([ \
 	sys/uio.h \
 	sys/vfs.h \
 	asm/cachectl.h \
-	asm/reg.h \
 	asm/sysmips.h \
 	linux/capability.h \
 	linux/ptrace.h \
@@ -244,7 +270,8 @@ AC_CHECK_HEADERS([ \
 ], [], [])
 AC_CHECK_HEADERS([linux/icmp.h linux/in6.h linux/netlink.h linux/if_packet.h],
                  [], [], [#include <stddef.h>
-#include <linux/socket.h>])
+#include <sys/socket.h>
+#include <asm/types.h>])
 AC_CHECK_HEADERS([asm/sigcontext.h], [], [], [#include <signal.h>])
 AC_CHECK_TYPES([struct sigcontext_struct,
 		struct sigcontext],,, [#include <signal.h>])

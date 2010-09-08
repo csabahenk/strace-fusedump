@@ -546,7 +546,6 @@ decode_select(struct tcb *tcp, long *args, enum bitness_t bitness)
 		outstr[0] = '\0';
 		for (i = 0; i < 3; i++) {
 			int first = 1;
-			char str[20];
 
 			tcp->auxstr = outstr;
 			arg = args[i+1];
@@ -555,6 +554,8 @@ decode_select(struct tcb *tcp, long *args, enum bitness_t bitness)
 				continue;
 			for (j = 0; j < args[0]; j++) {
 				if (FD_ISSET(j, fds)) {
+					char str[11 + 3 * sizeof(int)];
+
 					if (first) {
 						sprintf(str, "%s%s [%u", sep,
 							i == 0 ? "in" :
@@ -771,8 +772,10 @@ int
 sys_epoll_pwait(struct tcb *tcp)
 {
 	epoll_wait_common(tcp);
-	if (exiting(tcp))
+	if (exiting(tcp)) {
+		tprintf(", ");
 		print_sigset(tcp, tcp->u_arg[4], 0);
+	}
 	return 0;
 }
 
@@ -872,7 +875,7 @@ sys_io_cancel(struct tcb *tcp)
 				tprintf("{%p, %p, %ld, %ld}",
 					event.data, event.obj,
 					event.res, event.res2);
-			else 
+			else
 #endif
 				tprintf("{...}");
 		}

@@ -368,9 +368,8 @@ struct tcb *tcp;
 			tprintf("%#lx", tcp->u_arg[1]);
 		else
 			printstr(tcp, tcp->u_arg[1], tcp->u_rval);
-		ALIGN64 (tcp, PREAD_OFFSET_ARG); /* PowerPC alignment restriction */
-		tprintf(", %lu, %llu", tcp->u_arg[2],
-			*(unsigned long long *)&tcp->u_arg[PREAD_OFFSET_ARG]);
+		tprintf(", %lu, ", tcp->u_arg[2]);
+		printllval(tcp, "%llu", PREAD_OFFSET_ARG);
 	}
 	return 0;
 }
@@ -382,9 +381,8 @@ struct tcb *tcp;
 	if (entering(tcp)) {
 		tprintf("%ld, ", tcp->u_arg[0]);
 		printstr(tcp, tcp->u_arg[1], tcp->u_arg[2]);
-		ALIGN64 (tcp, PREAD_OFFSET_ARG); /* PowerPC alignment restriction */
-		tprintf(", %lu, %llu", tcp->u_arg[2],
-			*(unsigned long long *)&tcp->u_arg[PREAD_OFFSET_ARG]);
+		tprintf(", %lu, ", tcp->u_arg[2]);
+		printllval(tcp, "%llu", PREAD_OFFSET_ARG);
 	}
 	return 0;
 }
@@ -437,17 +435,12 @@ struct tcb *tcp;
 	if (entering(tcp)) {
 		tprintf("%ld, ", tcp->u_arg[0]);
 	} else {
-		ALIGN64 (tcp, 3);
 		if (syserror(tcp))
 			tprintf("%#lx", tcp->u_arg[1]);
 		else
 			printstr(tcp, tcp->u_arg[1], tcp->u_rval);
-#ifdef MIPS_LINUXN32
-		tprintf(", %lu, %#llx", tcp->u_arg[2], tcp->ext_arg[3]);
-#else
-		tprintf(", %lu, %#llx", tcp->u_arg[2],
-			LONG_LONG(tcp->u_arg[3], tcp->u_arg[4]));
-#endif
+		tprintf(", %lu, ", tcp->u_arg[2]);
+		printllval(tcp, "%#llx", 3);
 	}
 	return 0;
 }
@@ -457,15 +450,10 @@ sys_pwrite64(tcp)
 struct tcb *tcp;
 {
 	if (entering(tcp)) {
-		ALIGN64 (tcp, 3);
 		tprintf("%ld, ", tcp->u_arg[0]);
 		printstr(tcp, tcp->u_arg[1], tcp->u_arg[2]);
-#ifdef MIPS_LINUXN32
-		tprintf(", %lu, %#llx", tcp->u_arg[2], tcp->ext_arg[3]);
-#else
-		tprintf(", %lu, %#llx", tcp->u_arg[2],
-			LONG_LONG(tcp->u_arg[3], tcp->u_arg[4]));
-#endif
+		tprintf(", %lu, ", tcp->u_arg[2]);
+		printllval(tcp, "%#llx", 3);
 	}
 	return 0;
 }

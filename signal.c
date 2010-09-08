@@ -72,33 +72,14 @@
 # include <asm/ptrace_offsets.h>
 #endif /* !IA64 */
 
-#if HAVE_ASM_REG_H
-# if defined (SPARC) || defined (SPARC64)
-#  define fpq kernel_fpq
-#  define fq kernel_fq
-#  define fpu kernel_fpu
-# endif
-# include <asm/reg.h>
-# if defined (SPARC) || defined (SPARC64)
-#  undef fpq
-#  undef fq
-#  undef fpu
-# endif
 #if defined (LINUX) && defined (SPARC64)
-# define r_pc r_tpc
 # undef PTRACE_GETREGS
 # define PTRACE_GETREGS PTRACE_GETREGS64
 # undef PTRACE_SETREGS
 # define PTRACE_SETREGS PTRACE_SETREGS64
 #endif /* LINUX && SPARC64 */
-#endif /* HAVE_ASM_REG_H */
 
-#if defined (SPARC) || defined (SPARC64)
-typedef struct {
-	struct regs		si_regs;
-	int			si_mask;
-} m_siginfo_t;
-#elif defined (MIPS)
+#if defined (SPARC) || defined (SPARC64) || defined (MIPS)
 typedef struct {
 	struct pt_regs		si_regs;
 	int			si_mask;
@@ -248,6 +229,9 @@ static const struct xlat sigact_flags[] = {
 #endif
 #ifdef _SA_BSDCALL
 	{ _SA_BSDCALL,	"_SA_BSDCALL"	},
+#endif
+#ifdef SA_NOPTRACE
+	{ SA_NOPTRACE,	"SA_NOPTRACE"	},
 #endif
 	{ 0,		NULL		},
 };
@@ -1121,11 +1105,19 @@ struct tcb *tcp;
 	else if (umove(tcp, addr, &sa) < 0)
 		tprintf("{...}");
 	else {
-		if (sa.SA_HANDLER == SIG_ERR)
+		/* Architectures using function pointers, like
+		 * hppa, may need to manipulate the function pointer
+		 * to compute the result of a comparison. However,
+		 * the SA_HANDLER function pointer exists only in
+		 * the address space of the traced process, and can't
+		 * be manipulated by strace. In order to prevent the
+		 * compiler from generating code to manipulate
+		 * SA_HANDLER we cast the function pointers to long. */
+		if ((long)sa.SA_HANDLER == (long)SIG_ERR)
 			tprintf("{SIG_ERR, ");
-		else if (sa.SA_HANDLER == SIG_DFL)
+		else if ((long)sa.SA_HANDLER == (long)SIG_DFL)
 			tprintf("{SIG_DFL, ");
-		else if (sa.SA_HANDLER == SIG_IGN) {
+		else if ((long)sa.SA_HANDLER == (long)SIG_IGN) {
 #ifndef USE_PROCFS
 			if (tcp->u_arg[0] == SIGTRAP) {
 				tcp->flags |= TCB_SIGTRAPPED;
@@ -1337,6 +1329,15 @@ sys_sigreturn(struct tcb *tcp)
 		tcp->u_arg[0] = 0;
 		if (upeek(tcp, sizeof(unsigned long)*PT_R1, &esp) < 0)
 			return 0;
+		/* Skip dummy stack frame. */
+#ifdef POWERPC64
+		if (current_personality == 0)
+			esp += 128;
+		else
+			esp += 64;
+#else
+		esp += 64;
+#endif
 		if (umove(tcp, esp, &sc) < 0)
 			return 0;
 		tcp->u_arg[0] = 1;
@@ -1400,7 +1401,7 @@ sys_sigreturn(struct tcb *tcp)
 	return 0;
 #elif defined (SPARC) || defined (SPARC64)
 	long i1;
-	struct regs regs;
+	struct pt_regs regs;
 	m_siginfo_t si;
 
 	if(ptrace(PTRACE_GETREGS, tcp->pid, (char *)&regs, 0) < 0) {
@@ -1409,7 +1410,7 @@ sys_sigreturn(struct tcb *tcp)
 	}
 	if(entering(tcp)) {
 		tcp->u_arg[0] = 0;
-		i1 = regs.r_o1;
+		i1 = regs.u_regs[U_REG_O1];
 		if(umove(tcp, i1, &si) < 0) {
 			perror("sigreturn: umove ");
 			return 0;
@@ -1504,6 +1505,59 @@ sys_sigreturn(struct tcb *tcp)
 		return RVAL_NONE | RVAL_STR;
 	}
 	return 0;
+#elif defined(TILE)
+	struct ucontext uc;
+	long sp;
+
+	/* offset of ucontext in the kernel's sigframe structure */
+#	define SIGFRAME_UC_OFFSET C_ABI_SAVE_AREA_SIZE + sizeof(struct siginfo)
+
+	if (entering(tcp)) {
+		tcp->u_arg[0] = 0;
+		if (upeek(tcp, PTREGS_OFFSET_SP, &sp) < 0)
+			return 0;
+		if (umove(tcp, sp + SIGFRAME_UC_OFFSET, &uc) < 0)
+			return 0;
+		tcp->u_arg[0] = 1;
+		memcpy(tcp->u_arg + 1, &uc.uc_sigmask, sizeof(uc.uc_sigmask));
+	}
+	else {
+		sigset_t sigm;
+
+		memcpy(&sigm, tcp->u_arg + 1, sizeof (sigm));
+		tcp->u_rval = tcp->u_error = 0;
+		if (tcp->u_arg[0] == 0)
+			return 0;
+		tcp->auxstr = sprintsigmask("mask now ", &sigm, 0);
+		return RVAL_NONE | RVAL_STR;
+	}
+	return 0;
+#elif defined(MICROBLAZE)
+	struct sigcontext sc;
+
+	/* TODO: Verify that this is correct...  */
+	if (entering(tcp)) {
+		long sp;
+
+		tcp->u_arg[0] = 0;
+
+		/* Read r1, the stack pointer.  */
+		if (upeek(tcp, 1 * 4, &sp) < 0)
+			return 0;
+		if (umove(tcp, sp, &sc) < 0)
+			return 0;
+		tcp->u_arg[0] = 1;
+		tcp->u_arg[1] = sc.oldmask;
+	} else {
+		sigset_t sigm;
+		long_to_sigset(tcp->u_arg[1], &sigm);
+		tcp->u_rval = tcp->u_error = 0;
+		if (tcp->u_arg[0] == 0)
+			return 0;
+		tcp->auxstr = sprintsigmask("mask now ", &sigm, 0);
+		return RVAL_NONE | RVAL_STR;
+	}
+	return 0;
 #else
 #warning No sys_sigreturn() for this architecture
 #warning         (no problem, just a reminder :-)
@@ -1524,17 +1578,11 @@ struct tcb *tcp;
 }
 
 int
-sys_sigsuspend(tcp)
-struct tcb *tcp;
+sys_sigsuspend(struct tcb *tcp)
 {
 	if (entering(tcp)) {
 		sigset_t sigm;
 		long_to_sigset(tcp->u_arg[2], &sigm);
-#if 0
-		/* first two are not really arguments, but print them anyway */
-		/* nevermind, they are an anachronism now, too bad... */
-		tprintf("%d, %#x, ", tcp->u_arg[0], tcp->u_arg[1]);
-#endif
 		printsigmask(&sigm, 0);
 	}
 	return 0;
@@ -1931,12 +1979,19 @@ sys_rt_sigaction(struct tcb *tcp)
 		tprintf("{...}");
 		goto after_sa;
 	}
-
-	if (sa.__sa_handler == SIG_ERR)
+	/* Architectures using function pointers, like
+	 * hppa, may need to manipulate the function pointer
+	 * to compute the result of a comparison. However,
+	 * the SA_HANDLER function pointer exists only in
+	 * the address space of the traced process, and can't
+	 * be manipulated by strace. In order to prevent the
+	 * compiler from generating code to manipulate
+	 * SA_HANDLER we cast the function pointers to long. */
+	if ((long)sa.__sa_handler == (long)SIG_ERR)
 		tprintf("{SIG_ERR, ");
-	else if (sa.__sa_handler == SIG_DFL)
+	else if ((long)sa.__sa_handler == (long)SIG_DFL)
 		tprintf("{SIG_DFL, ");
-	else if (sa.__sa_handler == SIG_IGN)
+	else if ((long)sa.__sa_handler == (long)SIG_IGN)
 		tprintf("{SIG_IGN, ");
 	else
 		tprintf("{%#lx, ", (long) sa.__sa_handler);
@@ -2078,7 +2133,7 @@ do_signalfd(struct tcb *tcp, int flags_arg)
 	if (entering(tcp)) {
 		tprintf("%ld, ", tcp->u_arg[0]);
 		print_sigset(tcp, tcp->u_arg[1], 1);
-		tprintf("%lu", tcp->u_arg[2]);
+		tprintf(", %lu", tcp->u_arg[2]);
 		if (flags_arg >= 0) {
 			tprintf(", ");
 			printflags(open_mode_flags, tcp->u_arg[flags_arg], "O_???");

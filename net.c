@@ -833,6 +833,30 @@ static const struct xlat sockpacketoptions[] = {
 #if defined(PACKET_STATISTICS)
 	{ PACKET_STATISTICS,		"PACKET_STATISTICS"	},
 #endif
+#if defined(PACKET_COPY_THRESH)
+	{ PACKET_COPY_THRESH,		"PACKET_COPY_THRESH"	},
+#endif
+#if defined(PACKET_AUXDATA)
+	{ PACKET_AUXDATA,		"PACKET_AUXDATA"	},
+#endif
+#if defined(PACKET_ORIGDEV)
+	{ PACKET_ORIGDEV,		"PACKET_ORIGDEV"	},
+#endif
+#if defined(PACKET_VERSION)
+	{ PACKET_VERSION,		"PACKET_VERSION"	},
+#endif
+#if defined(PACKET_HDRLEN)
+	{ PACKET_HDRLEN,		"PACKET_HDRLEN"	},
+#endif
+#if defined(PACKET_RESERVE)
+	{ PACKET_RESERVE,		"PACKET_RESERVE"	},
+#endif
+#if defined(PACKET_TX_RING)
+	{ PACKET_TX_RING,		"PACKET_TX_RING"	},
+#endif
+#if defined(PACKET_LOSS)
+	{ PACKET_LOSS,			"PACKET_LOSS"	},
+#endif
 	{ 0,				NULL			},
 };
 #endif /* SOL_PACKET */
@@ -1161,37 +1185,62 @@ printcmsghdr(struct tcb *tcp, unsigned long addr, unsigned long len)
 }
 
 static void
+do_msghdr(struct tcb *tcp, struct msghdr *msg)
+{
+	int fdcond = 0;
+
+	tprintf("{msg_name(%d)=", msg->msg_namelen);
+	printsock(tcp, (long)msg->msg_name, msg->msg_namelen);
+
+	tprintf(", msg_iov(%lu)=", (unsigned long)msg->msg_iovlen);
+	tprint_iov(tcp, (unsigned long)msg->msg_iovlen,
+		   (unsigned long)msg->msg_iov, &fdcond);
+
+#ifdef HAVE_STRUCT_MSGHDR_MSG_CONTROL
+	tprintf(", msg_controllen=%lu", (unsigned long)msg->msg_controllen);
+	if (msg->msg_controllen)
+		printcmsghdr(tcp, (unsigned long) msg->msg_control,
+			     msg->msg_controllen);
+	tprintf(", msg_flags=");
+	printflags(msg_flags, msg->msg_flags, "MSG_???");
+#else /* !HAVE_STRUCT_MSGHDR_MSG_CONTROL */
+	tprintf("msg_accrights=%#lx, msg_accrightslen=%u",
+		(unsigned long) msg->msg_accrights, msg->msg_accrightslen);
+#endif /* !HAVE_STRUCT_MSGHDR_MSG_CONTROL */
+	tprintf("}");
+}
+
+static void
 printmsghdr(tcp, addr)
 struct tcb *tcp;
 long addr;
 {
 	struct msghdr msg;
-	int fdcond = 0;
-
 	if (umove(tcp, addr, &msg) < 0) {
 		tprintf("%#lx", addr);
 		return;
 	}
-	tprintf("{msg_name(%d)=", msg.msg_namelen);
-	printsock(tcp, (long)msg.msg_name, msg.msg_namelen);
-
-	tprintf(", msg_iov(%lu)=", (unsigned long)msg.msg_iovlen);
-	tprint_iov(tcp, (unsigned long)msg.msg_iovlen,
-		   (unsigned long)msg.msg_iov, &fdcond);
-
-#ifdef HAVE_STRUCT_MSGHDR_MSG_CONTROL
-	tprintf(", msg_controllen=%lu", (unsigned long)msg.msg_controllen);
-	if (msg.msg_controllen)
-		printcmsghdr(tcp, (unsigned long) msg.msg_control,
-			     msg.msg_controllen);
-	tprintf(", msg_flags=");
-	printflags(msg_flags, msg.msg_flags, "MSG_???");
-#else /* !HAVE_STRUCT_MSGHDR_MSG_CONTROL */
-	tprintf("msg_accrights=%#lx, msg_accrightslen=%u",
-		(unsigned long) msg.msg_accrights, msg.msg_accrightslen);
-#endif /* !HAVE_STRUCT_MSGHDR_MSG_CONTROL */
-	tprintf("}");
+	do_msghdr(tcp, &msg);
 }
+
+#ifdef LINUX
+static void
+printmmsghdr(struct tcb *tcp, long addr)
+{
+	struct mmsghdr {
+		struct msghdr msg_hdr;
+		unsigned msg_len;
+	} mmsg;
+
+	if (umove(tcp, addr, &mmsg) < 0) {
+		tprintf("%#lx", addr);
+		return;
+	}
+	tprintf("{");
+	do_msghdr(tcp, &mmsg.msg_hdr);
+	tprintf(", %u}", mmsg.msg_len);
+}
+#endif
 
 #endif /* HAVE_SENDMSG */
 
@@ -1304,13 +1353,14 @@ struct tcb *tcp;
 	return 0;
 }
 
-int
-sys_accept(tcp)
-struct tcb *tcp;
+static int
+do_accept(struct tcb *tcp, int flags_arg)
 {
 	if (entering(tcp)) {
 		tprintf("%ld, ", tcp->u_arg[0]);
-	} else if (!tcp->u_arg[2])
+		return 0;
+	}
+	if (!tcp->u_arg[2])
 		tprintf("%#lx, NULL", tcp->u_arg[1]);
 	else {
 		int len;
@@ -1323,8 +1373,27 @@ struct tcb *tcp;
 		tprintf(", ");
 		printnum_int(tcp, tcp->u_arg[2], "%u");
 	}
+	if (flags_arg >= 0) {
+		tprintf(", ");
+		printflags(sock_type_flags, tcp->u_arg[flags_arg],
+			   "SOCK_???");
+	}
 	return 0;
 }
+
+int
+sys_accept(struct tcb *tcp)
+{
+	return do_accept(tcp, -1);
+}
+
+#ifdef LINUX
+int
+sys_accept4(struct tcb *tcp)
+{
+	return do_accept(tcp, 3);
+}
+#endif
 
 int
 sys_send(tcp)
@@ -1460,6 +1529,55 @@ struct tcb *tcp;
 	return 0;
 }
 
+#ifdef LINUX
+int
+sys_recvmmsg(struct tcb *tcp)
+{
+	static char str[128];
+	if (entering(tcp)) {
+
+		tprintf("%ld, ", tcp->u_arg[0]);
+		if (verbose(tcp)) {
+			sprint_timespec(str, tcp, tcp->u_arg[4]);
+			tcp->auxstr = strdup(str);
+		} else {
+			tprintf("%#lx, %ld, ", tcp->u_arg[1], tcp->u_arg[2]);
+			printflags(msg_flags, tcp->u_arg[3], "MSG_???");
+			tprintf(", ");
+			print_timespec(tcp, tcp->u_arg[4]);
+		}
+		return 0;
+	} else {
+		if (verbose(tcp)) {
+			if (syserror(tcp))
+				tprintf("%#lx", tcp->u_arg[1]);
+			else
+				printmmsghdr(tcp, tcp->u_arg[1]);
+			tprintf(", %ld, ", tcp->u_arg[2]);
+			/* flags */
+			printflags(msg_flags, tcp->u_arg[3], "MSG_???");
+			/* timeout on entrance */
+			tprintf(", %s", tcp->auxstr ? tcp->auxstr : "{...}");
+			free((void *) tcp->auxstr);
+			tcp->auxstr = NULL;
+		}
+		if (syserror(tcp))
+			return 0;
+		if (tcp->u_rval == 0) {
+			tcp->auxstr = "Timeout";
+			return RVAL_STR;
+		}
+		if (!verbose(tcp))
+			return 0;
+		/* timeout on exit */
+		strcpy(str, "left ");
+		sprint_timespec(str + strlen(str), tcp, tcp->u_arg[4]);
+		tcp->auxstr = str;
+		return RVAL_STR;
+	}
+}
+#endif
+
 #endif /* HAVE_SENDMSG */
 
 int
@@ -1586,8 +1704,7 @@ sys_socketpair(struct tcb *tcp)
 }
 
 int
-sys_getsockopt(tcp)
-struct tcb *tcp;
+sys_getsockopt(struct tcb *tcp)
 {
 	if (entering(tcp)) {
 		tprintf("%ld, ", tcp->u_arg[0]);
@@ -1629,10 +1746,11 @@ struct tcb *tcp;
 			tprintf("%lu", tcp->u_arg[2]);
 			break;
 		}
+		tprintf (", ");
 	} else {
 		int len;
 		if (syserror(tcp) || umove (tcp, tcp->u_arg[4], &len) < 0) {
-			tprintf(", %#lx, %#lx",
+			tprintf("%#lx, %#lx",
 				tcp->u_arg[3], tcp->u_arg[4]);
 			return 0;
 		}
@@ -1648,7 +1766,7 @@ struct tcb *tcp;
 						   tcp->u_arg[3],
 						   &linger) < 0)
 						break;
-					tprintf(", {onoff=%d, linger=%d}, "
+					tprintf("{onoff=%d, linger=%d}, "
 						"[%d]",
 						linger.l_onoff,
 						linger.l_linger,
@@ -1659,11 +1777,31 @@ struct tcb *tcp;
 #endif
 			}
 			break;
+		case SOL_PACKET:
+			switch (tcp->u_arg[2]) {
+#ifdef PACKET_STATISTICS
+			case PACKET_STATISTICS:
+				if (len == sizeof(struct tpacket_stats)) {
+					struct tpacket_stats stats;
+					if (umove (tcp,
+						   tcp->u_arg[3],
+						   &stats) < 0)
+						break;
+					tprintf("{packets=%u, drops=%u}, "
+						"[%d]",
+						stats.tp_packets,
+						stats.tp_drops,
+						len);
+					return 0;
+				}
+				break;
+#endif
+			}
+			break;
 		}
 
-		tprintf (", ");
 		if (len == sizeof (int)) {
-			printnum(tcp, tcp->u_arg[3], "%ld");
+			printnum_int(tcp, tcp->u_arg[3], "%d");
 		}
 		else {
 			printstr (tcp, tcp->u_arg[3], len);
@@ -1747,6 +1885,28 @@ int len;
 	    case SOL_PACKET:
 		printxval(sockpacketoptions, name, "PACKET_???");
 		/* TODO: decode packate_mreq for PACKET_*_MEMBERSHIP */
+		switch (name) {
+#ifdef PACKET_RX_RING
+		    case PACKET_RX_RING:
+#endif
+#ifdef PACKET_TX_RING
+		    case PACKET_TX_RING:
+#endif
+#if defined(PACKET_RX_RING) || defined(PACKET_TX_RING)
+			if (len == sizeof(struct tpacket_req)) {
+				struct tpacket_req req;
+				if (umove(tcp, addr, &req) < 0)
+					break;
+				tprintf(", {block_size=%u, block_nr=%u, frame_size=%u, frame_nr=%u}",
+					req.tp_block_size,
+					req.tp_block_nr,
+					req.tp_frame_size,
+					req.tp_frame_nr);
+				return 0;
+			}
+			break;
+#endif /* PACKET_RX_RING || PACKET_TX_RING */
+		}
 		break;
 #endif
 #ifdef SOL_TCP
@@ -1960,17 +2120,6 @@ struct tcb *tcp;
 
 }
 
-#if 0
-
-int
-sys_xsetsockaddr(tcp)
-struct tcb *tcp;
-{
-	return netlib_call (tcp, sys_setsockaddr);
-}
-
-#endif
-
 int
 sys_xgetsockopt(tcp)
 struct tcb *tcp;
@@ -1992,4 +2141,4 @@ struct tcb *tcp;
 	return netlib_call (tcp, sys_shutdown);
 }
 
-#endif
+#endif /* UNIXWARE */

@@ -23,7 +23,7 @@
 	{ 1,	TD,	sys_pipe,		"pipe"		},  /* 22 */
 	{ 5,	TD,	sys_select,		"select"	},  /* 23 */
 	{ 0,	0,	sys_sched_yield,	"sched_yield"},  /* 24 */
-	{ 4,	0,	sys_mremap,		"mremap"	},  /* 25 */
+	{ 5,	0,	sys_mremap,		"mremap"	},  /* 25 */
 	{ 3,	0,	sys_msync,		"msync"		},  /* 26 */
 	{ 3,	0,	sys_mincore,		"mincore"	},  /* 27 */
 	{ 3,	0,	sys_madvise,		"madvise"	},  /* 28 */
@@ -286,10 +286,15 @@
 	{ 6,	TF,	sys_fallocate,		"fallocate"	}, /* 285 */
 	{ 4,	TD,	sys_timerfd_settime,	"timerfd_settime"}, /* 286 */
 	{ 2,	TD,	sys_timerfd_gettime,	"timerfd_gettime"}, /* 287 */
-	{ 6,	TN,	printargs,		"paccept"	}, /* 288 */
+	{ 4,	TN,	sys_accept4,		"accept4"	}, /* 288 */
 	{ 4,	TD|TS,	sys_signalfd4,		"signalfd4"	}, /* 289 */
 	{ 2,	TD,	sys_eventfd2,		"eventfd2"	}, /* 290 */
 	{ 1,	0,	sys_epoll_create1,	"epoll_create1"	}, /* 291 */
 	{ 3,	TD,	sys_dup3,		"dup3"		}, /* 292 */
 	{ 2,	TD,	sys_pipe2,		"pipe2"		}, /* 293 */
-	{ 1,	TD,	printargs,		"inotify_init1"	}, /* 294 */
+	{ 1,	TD,	sys_inotify_init1,	"inotify_init1"	}, /* 294 */
+	{ 5,	TD,	printargs,		"preadv"	}, /* 295 */
+	{ 5,	TD,	printargs,		"pwritev"	}, /* 296 */
+	{ 4,	TP|TS,	printargs,		"rt_tgsigqueueinfo"}, /* 297 */
+	{ 5,	TD,	printargs,		"perf_event_open"}, /* 298 */
+	{ 5,	TN,	sys_recvmmsg,		"recvmmsg"	}, /* 299 */

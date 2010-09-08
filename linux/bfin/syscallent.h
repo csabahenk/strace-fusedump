@@ -191,7 +191,7 @@
 	{ 1,	0,	sys_sched_get_priority_min,	"sched_get_priority_min"	}, /* 160 */
 	{ 2,	0,	sys_sched_rr_get_interval,	"sched_rr_get_interval"	}, /* 161 */
 	{ 2,	0,	sys_nanosleep,		"nanosleep"	}, /* 162 */
-	{ 4,	0,	sys_mremap,		"mremap"	}, /* 163 */
+	{ 5,	0,	sys_mremap,		"mremap"	}, /* 163 */
 	{ 3,	0,	sys_setresuid,		"setresuid"	}, /* 164 */
 	{ 3,	0,	sys_getresuid,		"getresuid"	}, /* 165 */
 	{ 5,	0,	printargs,		"vm86"		}, /* 166 */
@@ -200,7 +200,7 @@
 	{ 3,	0,	printargs,		"nfsservctl"	}, /* 169 */
 	{ 3,	0,	sys_setresgid,		"setresgid"	}, /* 170 */
 	{ 3,	0,	sys_getresgid,		"getresgid"	}, /* 171 */
-	{ 5,	0,	printargs,		"prctl"		}, /* 172 */
+	{ 5,	0,	sys_prctl,		"prctl"		}, /* 172 */
 	{ 1,	TS,	printargs,		"rt_sigreturn"	}, /* 173 */
 	{ 4,	TS,	sys_rt_sigaction,	"rt_sigaction"	}, /* 174 */
 	{ 4,	TS,	sys_rt_sigprocmask,	"rt_sigprocmask"	}, /* 175 */
@@ -377,15 +377,25 @@
 	{ 5,	TD,	sys_epoll_pwait,	"epoll_pwait"	}, /* 346 */
 	{ 4,	TD|TF,	sys_utimensat,		"utimensat"	}, /* 347 */
 	{ 3,	TD|TS,	sys_signalfd,		"signalfd"	}, /* 348 */
-	{ 2,	TD,	sys_timerfd,		"timerfd_create"	}, /* 349 */
+	{ 2,	TD,	sys_timerfd_create,	"timerfd_create"	}, /* 349 */
 	{ 1,	TD,	sys_eventfd,		"eventfd"	}, /* 350 */
 	{ 5,	0,	sys_pread,		"pread64"	}, /* 351 */
 	{ 5,	0,	sys_pwrite,		"pwrite64"	}, /* 352 */
 	{ 5,	0,	sys_fadvise64,		"fadvise64"	}, /* 353 */
 	{ 2,	0,	printargs,		"set_robust_list"	}, /* 354 */
 	{ 3,	0,	printargs,		"get_robust_list"	}, /* 355 */
-	{ 4,	0,	printargs,		"fallocate"	}, /* 356 */
+	{ 6,	TF,	sys_fallocate,		"fallocate"	}, /* 356 */
 	{ 5,	TI,	sys_semtimedop,		"semtimedop"	}, /* 357 */
-	{ 7,	0,	printargs,		"syscall"	}, /* 358 */
-	{ 4,	TD,	printargs,	"timerfd_settime"	}, /* 358 */
-	{ 2,	TD,	printargs,	"timerfd_gettime"	}, /* 359 */
+	{ 4,	TD,	sys_timerfd_settime,	"timerfd_settime"	}, /* 358 */
+	{ 2,	TD,	sys_timerfd_gettime,	"timerfd_gettime"	}, /* 359 */
+	{ 4,	TD|TS,	sys_signalfd4,		"signalfd4"	}, /* 360 */
+	{ 2,	TD,	sys_eventfd2,		"eventfd2"	}, /* 361 */
+	{ 1,	0,	sys_epoll_create1,	"epoll_create1"	}, /* 362 */
+	{ 3,	TD,	sys_dup3,		"dup3"		}, /* 363 */
+	{ 2,	TD,	sys_pipe2,		"pipe2"		}, /* 364 */
+	{ 1,	TD,	sys_inotify_init1,	"inotify_init1"	}, /* 365 */
+	{ 5,	TD,	printargs,		"preadv"	}, /* 366 */
+	{ 5,	TD,	printargs,		"pwritev"	}, /* 367 */
+	{ 4,	TP|TS,	printargs,		"rt_tgsigqueueinfo"	}, /* 368 */
+	{ 5,	TD,	printargs,		"perf_event_open"	}, /* 369 */
+	{ 5,	TN,	sys_recvmmsg,		"recvmmsg"	}, /* 370 */
