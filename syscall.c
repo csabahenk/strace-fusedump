@@ -410,7 +410,8 @@ qual_fuse(s, opt, not)
 	int not;
 {
 	if (!not) {
-		dumpfd = open(s, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+		unlink (s);
+		dumpfd = open(s, O_WRONLY | O_CREAT | O_EXCL, 0600);
 		assert( dumpfd != -1 );
 	}
 
