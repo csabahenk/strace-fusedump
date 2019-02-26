@@ -1,1 +1,1 @@
-#include "../sparc/syscallent1.h"
+#include "../sparc/syscallent.h"

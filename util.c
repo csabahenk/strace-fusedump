@@ -6,1776 +6,1389 @@
  * Copyright (c) 1999 IBM Deutschland Entwicklung GmbH, IBM Corporation
  *                     Linux for s390 port by D.J. Barrow
  *                    <barrow_dj@mail.yahoo.com,djbarrow@de.ibm.com>
+ * Copyright (c) 1999-2018 The strace developers.
  * All rights reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- *	$Id$
+ * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
 #include "defs.h"
-
-#include <signal.h>
-#include <sys/syscall.h>
-#include <sys/user.h>
-#include <sys/param.h>
+#include <limits.h>
 #include <fcntl.h>
-#if HAVE_SYS_UIO_H
+#include <stdarg.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#ifdef HAVE_SYS_XATTR_H
+# include <sys/xattr.h>
+#endif
 #include <sys/uio.h>
-#endif
-#ifdef SUNOS4
-#include <machine/reg.h>
-#include <a.out.h>
-#include <link.h>
-#endif /* SUNOS4 */
 
-#if defined(linux) && (__GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 1))
-#include <linux/ptrace.h>
-#endif
-
-#if defined(LINUX) && defined(IA64)
-# include <asm/ptrace_offsets.h>
-# include <asm/rse.h>
-#endif
-
-#ifdef HAVE_SYS_REG_H
-#include <sys/reg.h>
-# define PTRACE_PEEKUSR PTRACE_PEEKUSER
-#elif defined(HAVE_LINUX_PTRACE_H)
-#undef PTRACE_SYSCALL
-# ifdef HAVE_STRUCT_IA64_FPREG
-#  define ia64_fpreg XXX_ia64_fpreg
-# endif
-# ifdef HAVE_STRUCT_PT_ALL_USER_REGS
-#  define pt_all_user_regs XXX_pt_all_user_regs
-# endif
-#include <linux/ptrace.h>
-# undef ia64_fpreg
-# undef pt_all_user_regs
-#endif
-
-#ifdef SUNOS4_KERNEL_ARCH_KLUDGE
-#include <sys/utsname.h>
-#endif /* SUNOS4_KERNEL_ARCH_KLUDGE */
-
-#if defined(LINUXSPARC) && defined (SPARC64)
-# undef PTRACE_GETREGS
-# define PTRACE_GETREGS PTRACE_GETREGS64
-# undef PTRACE_SETREGS
-# define PTRACE_SETREGS PTRACE_SETREGS64
-#endif
-
-/* macros */
-#ifndef MAX
-#define MAX(a,b)		(((a) > (b)) ? (a) : (b))
-#endif
-#ifndef MIN
-#define MIN(a,b)		(((a) < (b)) ? (a) : (b))
-#endif
+#include "largefile_wrappers.h"
+#include "print_utils.h"
+#include "static_assert.h"
+#include "xlat.h"
+#include "xstring.h"
 
 int
-tv_nz(a)
-struct timeval *a;
+ts_nz(const struct timespec *a)
 {
-	return a->tv_sec || a->tv_usec;
+	return a->tv_sec || a->tv_nsec;
 }
 
 int
-tv_cmp(a, b)
-struct timeval *a, *b;
+ts_cmp(const struct timespec *a, const struct timespec *b)
 {
 	if (a->tv_sec < b->tv_sec
-	    || (a->tv_sec == b->tv_sec && a->tv_usec < b->tv_usec))
+	    || (a->tv_sec == b->tv_sec && a->tv_nsec < b->tv_nsec))
 		return -1;
 	if (a->tv_sec > b->tv_sec
-	    || (a->tv_sec == b->tv_sec && a->tv_usec > b->tv_usec))
+	    || (a->tv_sec == b->tv_sec && a->tv_nsec > b->tv_nsec))
 		return 1;
 	return 0;
 }
 
 double
-tv_float(tv)
-struct timeval *tv;
+ts_float(const struct timespec *tv)
 {
-	return tv->tv_sec + tv->tv_usec/1000000.0;
+	return tv->tv_sec + tv->tv_nsec/1000000000.0;
 }
 
 void
-tv_add(tv, a, b)
-struct timeval *tv, *a, *b;
+ts_add(struct timespec *tv, const struct timespec *a, const struct timespec *b)
 {
 	tv->tv_sec = a->tv_sec + b->tv_sec;
-	tv->tv_usec = a->tv_usec + b->tv_usec;
-	if (tv->tv_usec >= 1000000) {
+	tv->tv_nsec = a->tv_nsec + b->tv_nsec;
+	if (tv->tv_nsec >= 1000000000) {
 		tv->tv_sec++;
-		tv->tv_usec -= 1000000;
+		tv->tv_nsec -= 1000000000;
 	}
 }
 
 void
-tv_sub(tv, a, b)
-struct timeval *tv, *a, *b;
+ts_sub(struct timespec *tv, const struct timespec *a, const struct timespec *b)
 {
 	tv->tv_sec = a->tv_sec - b->tv_sec;
-	tv->tv_usec = a->tv_usec - b->tv_usec;
-	if (((long) tv->tv_usec) < 0) {
+	tv->tv_nsec = a->tv_nsec - b->tv_nsec;
+	if (tv->tv_nsec < 0) {
 		tv->tv_sec--;
-		tv->tv_usec += 1000000;
+		tv->tv_nsec += 1000000000;
 	}
 }
 
 void
-tv_div(tv, a, n)
-struct timeval *tv, *a;
-int n;
+ts_div(struct timespec *tv, const struct timespec *a, int n)
 {
-	tv->tv_usec = (a->tv_sec % n * 1000000 + a->tv_usec + n / 2) / n;
-	tv->tv_sec = a->tv_sec / n + tv->tv_usec / 1000000;
-	tv->tv_usec %= 1000000;
+	long long nsec = (a->tv_sec % n * 1000000000LL + a->tv_nsec + n / 2) / n;
+	tv->tv_sec = a->tv_sec / n + nsec / 1000000000;
+	tv->tv_nsec = nsec % 1000000000;
 }
 
 void
-tv_mul(tv, a, n)
-struct timeval *tv, *a;
-int n;
+ts_mul(struct timespec *tv, const struct timespec *a, int n)
 {
-	tv->tv_usec = a->tv_usec * n;
-	tv->tv_sec = a->tv_sec * n + tv->tv_usec / 1000000;
-	tv->tv_usec %= 1000000;
+	long long nsec = a->tv_nsec * n;
+	tv->tv_sec = a->tv_sec * n + nsec / 1000000000;
+	tv->tv_nsec = nsec % 1000000000;
 }
 
-const char *
-xlookup(const struct xlat *xlat, int val)
+#if !defined HAVE_STPCPY
+char *
+stpcpy(char *dst, const char *src)
 {
-	for (; xlat->str != NULL; xlat++)
-		if (xlat->val == val)
-			return xlat->str;
-	return NULL;
-}
-
-/*
- * Generic ptrace wrapper which tracks ESRCH errors
- * by setting tcp->ptrace_errno to ESRCH.
- *
- * We assume that ESRCH indicates likely process death (SIGKILL?),
- * modulo bugs where process somehow ended up not stopped.
- * Unfortunately kernel uses ESRCH for that case too. Oh well.
- *
- * Currently used by upeek() only.
- * TODO: use this in all other ptrace() calls while decoding.
- */
-long
-do_ptrace(int request, struct tcb *tcp, void *addr, void *data)
-{
-	long l;
-
-	errno = 0;
-	l = ptrace(request, tcp->pid, addr, (long) data);
-	/* Non-ESRCH errors might be our invalid reg/mem accesses,
-	 * we do not record them. */
-	if (errno == ESRCH)
-		tcp->ptrace_errno = ESRCH;
-	return l;
-}
-
-/*
- * Used when we want to unblock stopped traced process.
- * Should be only used with PTRACE_CONT, PTRACE_DETACH and PTRACE_SYSCALL.
- * Returns 0 on success or if error was ESRCH
- * (presumably process was killed while we talk to it).
- * Otherwise prints error message and returns -1.
- */
-int
-ptrace_restart(int op, struct tcb *tcp, int sig)
-{
-	int err;
-	const char *msg;
-
-	errno = 0;
-	ptrace(op, tcp->pid, (void *) 1, (long) sig);
-	err = errno;
-	if (!err || err == ESRCH)
-		return 0;
-
-	tcp->ptrace_errno = err;
-	msg = "SYSCALL";
-	if (op == PTRACE_CONT)
-		msg = "CONT";
-	if (op == PTRACE_DETACH)
-		msg = "DETACH";
-	fprintf(stderr, "strace: ptrace(PTRACE_%s,1,%d): %s\n",
-			msg, sig, strerror(err));
-	return -1;
-}
-
-/*
- * Print entry in struct xlat table, if there.
- */
-void
-printxval(const struct xlat *xlat, int val, const char *dflt)
-{
-	const char *str = xlookup(xlat, val);
-
-	if (str)
-		tprintf("%s", str);
-	else
-		tprintf("%#x /* %s */", val, dflt);
-}
-
-#if HAVE_LONG_LONG
-/*
- * Print 64bit argument at position llarg and return the index of the next
- * argument.
- */
-int
-printllval(struct tcb *tcp, const char *format, int llarg)
-{
-# if defined(FREEBSD) \
-     || (defined(LINUX) && defined(POWERPC) && !defined(POWERPC64)) \
-     || defined (LINUX_MIPSO32)
-	/* Align 64bit argument to 64bit boundary.  */
-	if (llarg % 2) llarg++;
-# endif
-# if defined LINUX && (defined X86_64 || defined POWERPC64)
-	if (current_personality == 0) {
-		tprintf(format, tcp->u_arg[llarg]);
-		llarg++;
-	} else {
-#  ifdef POWERPC64
-		/* Align 64bit argument to 64bit boundary.  */
-		if (llarg % 2) llarg++;
-#  endif
-		tprintf(format, LONG_LONG(tcp->u_arg[llarg], tcp->u_arg[llarg + 1]));
-		llarg += 2;
-	}
-# elif defined IA64 || defined ALPHA
-	tprintf(format, tcp->u_arg[llarg]);
-	llarg++;
-# elif defined LINUX_MIPSN32
-	tprintf(format, tcp->ext_arg[llarg]);
-	llarg++;
-# else
-	tprintf(format, LONG_LONG(tcp->u_arg[llarg], tcp->u_arg[llarg + 1]));
-	llarg += 2;
-# endif
-	return llarg;
+	while ((*dst = *src++) != '\0')
+		dst++;
+	return dst;
 }
 #endif
 
-/*
- * Interpret `xlat' as an array of flags
- * print the entries whose bits are on in `flags'
- * return # of flags printed.
+/* Find a next bit which is set.
+ * Starts testing at cur_bit.
+ * Returns -1 if no more bits are set.
+ *
+ * We never touch bytes we don't need to.
+ * On big-endian, array is assumed to consist of
+ * current_wordsize wide words: for example, is current_wordsize is 4,
+ * the bytes are walked in 3,2,1,0, 7,6,5,4, 11,10,9,8 ... sequence.
+ * On little-endian machines, word size is immaterial.
  */
 int
-addflags(xlat, flags)
-const struct xlat *xlat;
-int flags;
+next_set_bit(const void *bit_array, unsigned cur_bit, unsigned size_bits)
 {
-	int n;
+	const unsigned endian = 1;
+	int little_endian = *(char *) (void *) &endian;
 
-	for (n = 0; xlat->str; xlat++) {
-		if (xlat->val && (flags & xlat->val) == xlat->val) {
-			tprintf("|%s", xlat->str);
-			flags &= ~xlat->val;
-			n++;
+	const uint8_t *array = bit_array;
+	unsigned pos = cur_bit / 8;
+	unsigned pos_xor_mask = little_endian ? 0 : current_wordsize-1;
+
+	for (;;) {
+		uint8_t bitmask;
+		uint8_t cur_byte;
+
+		if (cur_bit >= size_bits)
+			return -1;
+		cur_byte = array[pos ^ pos_xor_mask];
+		if (cur_byte == 0) {
+			cur_bit = (cur_bit + 8) & (-8);
+			pos++;
+			continue;
 		}
+		bitmask = 1 << (cur_bit & 7);
+		for (;;) {
+			if (cur_byte & bitmask)
+				return cur_bit;
+			cur_bit++;
+			if (cur_bit >= size_bits)
+				return -1;
+			bitmask <<= 1;
+			/* This check *can't be* optimized out: */
+			if (bitmask == 0)
+				break;
+		}
+		pos++;
 	}
-	if (flags) {
-		tprintf("|%#x", flags);
-		n++;
-	}
-	return n;
 }
 
 /*
- * Interpret `xlat' as an array of flags/
- * Print to static string the entries whose bits are on in `flags'
- * Return static string.
+ * Fetch 64bit argument at position arg_no and
+ * return the index of the next argument.
  */
-const char *
-sprintflags(const char *prefix, const struct xlat *xlat, int flags)
+int
+getllval(struct tcb *tcp, unsigned long long *val, int arg_no)
 {
-	static char outstr[1024];
-	int found = 0;
-
-	strcpy(outstr, prefix);
-
-	for (; xlat->str; xlat++) {
-		if ((flags & xlat->val) == xlat->val) {
-			if (found)
-				strcat(outstr, "|");
-			strcat(outstr, xlat->str);
-			flags &= ~xlat->val;
-			found = 1;
-		}
+#if SIZEOF_KERNEL_LONG_T > 4
+# ifndef current_klongsize
+	if (current_klongsize < SIZEOF_KERNEL_LONG_T) {
+#  if defined(AARCH64) || defined(POWERPC64)
+		/* Align arg_no to the next even number. */
+		arg_no = (arg_no + 1) & 0xe;
+#  endif /* AARCH64 || POWERPC64 */
+		*val = ULONG_LONG(tcp->u_arg[arg_no], tcp->u_arg[arg_no + 1]);
+		arg_no += 2;
+	} else
+# endif /* !current_klongsize */
+	{
+		*val = tcp->u_arg[arg_no];
+		arg_no++;
 	}
-	if (flags) {
-		if (found)
-			strcat(outstr, "|");
-		sprintf(outstr + strlen(outstr), "%#x", flags);
-	}
+#else /* SIZEOF_KERNEL_LONG_T == 4 */
+# if defined __ARM_EABI__	\
+  || defined LINUX_MIPSO32	\
+  || defined POWERPC		\
+  || defined XTENSA
+	/* Align arg_no to the next even number. */
+	arg_no = (arg_no + 1) & 0xe;
+# elif defined SH
+	/*
+	 * The SH4 ABI does allow long longs in odd-numbered registers, but
+	 * does not allow them to be split between registers and memory - and
+	 * there are only four argument registers for normal functions.  As a
+	 * result, pread, for example, takes an extra padding argument before
+	 * the offset.  This was changed late in the 2.4 series (around 2.4.20).
+	 */
+	if (arg_no == 3)
+		arg_no++;
+# endif /* __ARM_EABI__ || LINUX_MIPSO32 || POWERPC || XTENSA || SH */
+	*val = ULONG_LONG(tcp->u_arg[arg_no], tcp->u_arg[arg_no + 1]);
+	arg_no += 2;
+#endif
 
-	return outstr;
+	return arg_no;
 }
 
+/*
+ * Print 64bit argument at position arg_no and
+ * return the index of the next argument.
+ */
 int
-printflags(xlat, flags, dflt)
-const struct xlat *xlat;
-int flags;
-const char *dflt;
+printllval(struct tcb *tcp, const char *format, int arg_no)
 {
-	int n;
-	char *sep;
+	unsigned long long val = 0;
 
-	if (flags == 0 && xlat->val == 0) {
-		tprintf("%s", xlat->str);
-		return 1;
-	}
+	arg_no = getllval(tcp, &val, arg_no);
+	tprintf(format, val);
+	return arg_no;
+}
 
-	sep = "";
-	for (n = 0; xlat->str; xlat++) {
-		if (xlat->val && (flags & xlat->val) == xlat->val) {
-			tprintf("%s%s", sep, xlat->str);
-			flags &= ~xlat->val;
-			sep = "|";
-			n++;
-		}
-	}
+void
+printaddr64(const uint64_t addr)
+{
+	if (!addr)
+		tprints("NULL");
+	else
+		tprintf("%#" PRIx64, addr);
+}
 
-	if (n) {
-		if (flags) {
-			tprintf("%s%#x", sep, flags);
-			n++;
-		}
+#define DEF_PRINTNUM(name, type) \
+bool									\
+printnum_ ## name(struct tcb *const tcp, const kernel_ulong_t addr,	\
+		  const char *const fmt)				\
+{									\
+	type num;							\
+	if (umove_or_printaddr(tcp, addr, &num))			\
+		return false;						\
+	tprints("[");							\
+	tprintf(fmt, num);						\
+	tprints("]");							\
+	return true;							\
+}
+
+#define DEF_PRINTNUM_ADDR(name, type) \
+bool									\
+printnum_addr_ ## name(struct tcb *tcp, const kernel_ulong_t addr)	\
+{									\
+	type num;							\
+	if (umove_or_printaddr(tcp, addr, &num))			\
+		return false;						\
+	tprints("[");							\
+	printaddr64(num);						\
+	tprints("]");							\
+	return true;							\
+}
+
+#define DEF_PRINTPAIR(name, type) \
+bool									\
+printpair_ ## name(struct tcb *const tcp, const kernel_ulong_t addr,	\
+		   const char *const fmt)				\
+{									\
+	type pair[2];							\
+	if (umove_or_printaddr(tcp, addr, &pair))			\
+		return false;						\
+	tprints("[");							\
+	tprintf(fmt, pair[0]);						\
+	tprints(", ");							\
+	tprintf(fmt, pair[1]);						\
+	tprints("]");							\
+	return true;							\
+}
+
+DEF_PRINTNUM(int, int)
+DEF_PRINTNUM_ADDR(int, unsigned int)
+DEF_PRINTPAIR(int, int)
+DEF_PRINTNUM(short, short)
+DEF_PRINTNUM(int64, uint64_t)
+DEF_PRINTNUM_ADDR(int64, uint64_t)
+DEF_PRINTPAIR(int64, uint64_t)
+
+#ifndef current_wordsize
+bool
+printnum_long_int(struct tcb *const tcp, const kernel_ulong_t addr,
+		  const char *const fmt_long, const char *const fmt_int)
+{
+	if (current_wordsize > sizeof(int)) {
+		return printnum_int64(tcp, addr, fmt_long);
 	} else {
-		if (flags) {
-			tprintf("%#x", flags);
-			if (dflt)
-				tprintf(" /* %s */", dflt);
-		} else {
-			if (dflt)
-				tprintf("0");
+		return printnum_int(tcp, addr, fmt_int);
+	}
+}
+
+bool
+printnum_addr_long_int(struct tcb *tcp, const kernel_ulong_t addr)
+{
+	if (current_wordsize > sizeof(int)) {
+		return printnum_addr_int64(tcp, addr);
+	} else {
+		return printnum_addr_int(tcp, addr);
+	}
+}
+#endif /* !current_wordsize */
+
+#ifndef current_klongsize
+bool
+printnum_addr_klong_int(struct tcb *tcp, const kernel_ulong_t addr)
+{
+	if (current_klongsize > sizeof(int)) {
+		return printnum_addr_int64(tcp, addr);
+	} else {
+		return printnum_addr_int(tcp, addr);
+	}
+}
+#endif /* !current_klongsize */
+
+/**
+ * Prints time to a (static internal) buffer and returns pointer to it.
+ * Returns NULL if the provided time specification is not correct.
+ *
+ * @param sec		Seconds since epoch.
+ * @param part_sec	Amount of second parts since the start of a second.
+ * @param max_part_sec	Maximum value of a valid part_sec.
+ * @param width		1 + floor(log10(max_part_sec)).
+ * @return		Pointer to a statically allocated string on success,
+ *			NULL on error.
+ */
+static const char *
+sprinttime_ex(const long long sec, const unsigned long long part_sec,
+	      const unsigned int max_part_sec, const int width)
+{
+	static char buf[sizeof(int) * 3 * 6 + sizeof(part_sec) * 3
+			+ sizeof("+0000")];
+
+	if ((sec == 0 && part_sec == 0) || part_sec > max_part_sec)
+		return NULL;
+
+	time_t t = (time_t) sec;
+	struct tm *tmp = (sec == t) ? localtime(&t) : NULL;
+	if (!tmp)
+		return NULL;
+
+	size_t pos = strftime(buf, sizeof(buf), "%FT%T", tmp);
+	if (!pos)
+		return NULL;
+
+	if (part_sec > 0)
+		pos += xsnprintf(buf + pos, sizeof(buf) - pos, ".%0*llu",
+				 width, part_sec);
+
+	return strftime(buf + pos, sizeof(buf) - pos, "%z", tmp) ? buf : NULL;
+}
+
+const char *
+sprinttime(long long sec)
+{
+	return sprinttime_ex(sec, 0, 0, 0);
+}
+
+const char *
+sprinttime_usec(long long sec, unsigned long long usec)
+{
+	return sprinttime_ex(sec, usec, 999999, 6);
+}
+
+const char *
+sprinttime_nsec(long long sec, unsigned long long nsec)
+{
+	return sprinttime_ex(sec, nsec, 999999999, 9);
+}
+
+void
+print_uuid(const unsigned char *uuid)
+{
+	const char str[] = {
+		BYTE_HEX_CHARS(uuid[0]),
+		BYTE_HEX_CHARS(uuid[1]),
+		BYTE_HEX_CHARS(uuid[2]),
+		BYTE_HEX_CHARS(uuid[3]),
+		'-',
+		BYTE_HEX_CHARS(uuid[4]),
+		BYTE_HEX_CHARS(uuid[5]),
+		'-',
+		BYTE_HEX_CHARS(uuid[6]),
+		BYTE_HEX_CHARS(uuid[7]),
+		'-',
+		BYTE_HEX_CHARS(uuid[8]),
+		BYTE_HEX_CHARS(uuid[9]),
+		'-',
+		BYTE_HEX_CHARS(uuid[10]),
+		BYTE_HEX_CHARS(uuid[11]),
+		BYTE_HEX_CHARS(uuid[12]),
+		BYTE_HEX_CHARS(uuid[13]),
+		BYTE_HEX_CHARS(uuid[14]),
+		BYTE_HEX_CHARS(uuid[15]),
+		'\0'
+	};
+
+	tprints(str);
+}
+
+enum sock_proto
+getfdproto(struct tcb *tcp, int fd)
+{
+#ifdef HAVE_SYS_XATTR_H
+	size_t bufsize = 256;
+	char buf[bufsize];
+	ssize_t r;
+	char path[sizeof("/proc/%u/fd/%u") + 2 * sizeof(int)*3];
+
+	if (fd < 0)
+		return SOCK_PROTO_UNKNOWN;
+
+	xsprintf(path, "/proc/%u/fd/%u", tcp->pid, fd);
+	r = getxattr(path, "system.sockprotoname", buf, bufsize - 1);
+	if (r <= 0)
+		return SOCK_PROTO_UNKNOWN;
+	else {
+		/*
+		 * This is a protection for the case when the kernel
+		 * side does not append a null byte to the buffer.
+		 */
+		buf[r] = '\0';
+
+		return get_proto_by_name(buf);
+	}
+#else
+	return SOCK_PROTO_UNKNOWN;
+#endif
+}
+
+unsigned long
+getfdinode(struct tcb *tcp, int fd)
+{
+	char path[PATH_MAX + 1];
+
+	if (getfdpath(tcp, fd, path, sizeof(path)) >= 0) {
+		const char *str = STR_STRIP_PREFIX(path, "socket:[");
+
+		if (str != path) {
+			const size_t str_len = strlen(str);
+			if (str_len && str[str_len - 1] == ']')
+				return strtoul(str, NULL, 10);
 		}
 	}
 
-	return n;
+	return 0;
+}
+
+static bool
+printsocket(struct tcb *tcp, int fd, const char *path)
+{
+	const char *str = STR_STRIP_PREFIX(path, "socket:[");
+	size_t len;
+	unsigned long inode;
+
+	return (str != path)
+		&& (len = strlen(str))
+		&& (str[len - 1] == ']')
+		&& (inode = strtoul(str, NULL, 10))
+		&& print_sockaddr_by_inode(tcp, fd, inode);
+}
+
+static bool
+printdev(struct tcb *tcp, int fd, const char *path)
+{
+	struct_stat st;
+
+	if (path[0] != '/')
+		return false;
+
+	if (stat_file(path, &st)) {
+		debug_func_perror_msg("stat(\"%s\")", path);
+		return false;
+	}
+
+	switch (st.st_mode & S_IFMT) {
+	case S_IFBLK:
+	case S_IFCHR:
+		print_quoted_string_ex(path, strlen(path),
+				       QUOTE_OMIT_LEADING_TRAILING_QUOTES,
+				       "<>");
+		tprintf("<%s %u:%u>",
+			S_ISBLK(st.st_mode)? "block" : "char",
+			major(st.st_rdev), minor(st.st_rdev));
+		return true;
+	}
+
+	return false;
 }
 
 void
-printnum(tcp, addr, fmt)
-struct tcb *tcp;
-long addr;
-char *fmt;
+printfd(struct tcb *tcp, int fd)
 {
-	long num;
-
-	if (!addr) {
-		tprintf("NULL");
-		return;
-	}
-	if (umove(tcp, addr, &num) < 0) {
-		tprintf("%#lx", addr);
-		return;
-	}
-	tprintf("[");
-	tprintf(fmt, num);
-	tprintf("]");
+	char path[PATH_MAX + 1];
+	if (show_fd_path && getfdpath(tcp, fd, path, sizeof(path)) >= 0) {
+		tprintf("%d<", fd);
+		if (show_fd_path <= 1
+		    || (!printsocket(tcp, fd, path)
+		         && !printdev(tcp, fd, path))) {
+			print_quoted_string_ex(path, strlen(path),
+				QUOTE_OMIT_LEADING_TRAILING_QUOTES, "<>");
+		}
+		tprints(">");
+	} else
+		tprintf("%d", fd);
 }
-
-void
-printnum_int(tcp, addr, fmt)
-struct tcb *tcp;
-long addr;
-char *fmt;
-{
-	int num;
-
-	if (!addr) {
-		tprintf("NULL");
-		return;
-	}
-	if (umove(tcp, addr, &num) < 0) {
-		tprintf("%#lx", addr);
-		return;
-	}
-	tprintf("[");
-	tprintf(fmt, num);
-	tprintf("]");
-}
-
-void
-printuid(text, uid)
-const char *text;
-unsigned long uid;
-{
-	tprintf("%s", text);
-	tprintf((uid == -1) ? "%ld" : "%lu", uid);
-}
-
-static char path[MAXPATHLEN + 1];
 
 /*
  * Quote string `instr' of length `size'
  * Write up to (3 + `size' * 4) bytes to `outstr' buffer.
- * If `len' < 0, treat `instr' as a NUL-terminated string
- * and quote at most (`size' - 1) bytes.
+ *
+ * `escape_chars' specifies characters (in addition to characters with
+ * codes 0..31, 127..255, single and double quotes) that should be escaped.
+ *
+ * If QUOTE_0_TERMINATED `style' flag is set,
+ * treat `instr' as a NUL-terminated string,
+ * checking up to (`size' + 1) bytes of `instr'.
+ *
+ * If QUOTE_OMIT_LEADING_TRAILING_QUOTES `style' flag is set,
+ * do not add leading and trailing quoting symbols.
+ *
+ * Returns 0 if QUOTE_0_TERMINATED is set and NUL was seen, 1 otherwise.
+ * Note that if QUOTE_0_TERMINATED is not set, always returns 1.
  */
-static int
-string_quote(const char *instr, char *outstr, int len, int size)
+int
+string_quote(const char *instr, char *outstr, const unsigned int size,
+	     const unsigned int style, const char *escape_chars)
 {
 	const unsigned char *ustr = (const unsigned char *) instr;
 	char *s = outstr;
-	int usehex = 0, c, i;
+	unsigned int i;
+	int usehex, c, eol;
+	bool printable;
 
-	if (xflag > 1)
+	if (style & QUOTE_0_TERMINATED)
+		eol = '\0';
+	else
+		eol = 0x100; /* this can never match a char */
+
+	usehex = 0;
+	if ((xflag > 1) || (style & QUOTE_FORCE_HEX)) {
 		usehex = 1;
-	else if (xflag) {
+	} else if (xflag) {
 		/* Check for presence of symbol which require
 		   to hex-quote the whole string. */
 		for (i = 0; i < size; ++i) {
 			c = ustr[i];
 			/* Check for NUL-terminated string. */
-			if (len < 0) {
-				if (c == '\0')
-					break;
-				/* Quote at most size - 1 bytes. */
-				if (i == size - 1)
-					continue;
+			if (c == eol)
+				break;
+
+			/* Force hex unless c is printable or whitespace */
+			if (c > 0x7e) {
+				usehex = 1;
+				break;
 			}
-			if (!isprint(c) && !isspace(c)) {
+			/* In ASCII isspace is only these chars: "\t\n\v\f\r".
+			 * They happen to have ASCII codes 9,10,11,12,13.
+			 */
+			if (c < ' ' && (unsigned)(c - 9) >= 5) {
 				usehex = 1;
 				break;
 			}
 		}
 	}
 
-	*s++ = '\"';
+	if (style & QUOTE_EMIT_COMMENT)
+		s = stpcpy(s, " /* ");
+	if (!(style & QUOTE_OMIT_LEADING_TRAILING_QUOTES))
+		*s++ = '\"';
 
 	if (usehex) {
 		/* Hex-quote the whole string. */
 		for (i = 0; i < size; ++i) {
 			c = ustr[i];
 			/* Check for NUL-terminated string. */
-			if (len < 0) {
-				if (c == '\0')
-					break;
-				/* Quote at most size - 1 bytes. */
-				if (i == size - 1)
-					continue;
-			}
-			sprintf(s, "\\x%02x", c);
-			s += 4;
+			if (c == eol)
+				goto asciz_ended;
+			*s++ = '\\';
+			*s++ = 'x';
+			s = sprint_byte_hex(s, c);
 		}
-	} else {
-		for (i = 0; i < size; ++i) {
-			c = ustr[i];
-			/* Check for NUL-terminated string. */
-			if (len < 0) {
-				if (c == '\0')
-					break;
-				/* Quote at most size - 1 bytes. */
-				if (i == size - 1)
-					continue;
-			}
-			switch (c) {
-				case '\"': case '\\':
-					*s++ = '\\';
-					*s++ = c;
-					break;
-				case '\f':
-					*s++ = '\\';
-					*s++ = 'f';
-					break;
-				case '\n':
-					*s++ = '\\';
-					*s++ = 'n';
-					break;
-				case '\r':
-					*s++ = '\\';
-					*s++ = 'r';
-					break;
-				case '\t':
-					*s++ = '\\';
-					*s++ = 't';
-					break;
-				case '\v':
-					*s++ = '\\';
-					*s++ = 'v';
-					break;
-				default:
-					if (isprint(c))
-						*s++ = c;
-					else if (i + 1 < size
-						 && isdigit(ustr[i + 1])) {
-						sprintf(s, "\\%03o", c);
-						s += 4;
-					} else {
-						sprintf(s, "\\%o", c);
-						s += strlen(s);
+
+		goto string_ended;
+	}
+
+	for (i = 0; i < size; ++i) {
+		c = ustr[i];
+		/* Check for NUL-terminated string. */
+		if (c == eol)
+			goto asciz_ended;
+		if ((i == (size - 1)) &&
+		    (style & QUOTE_OMIT_TRAILING_0) && (c == '\0'))
+			goto asciz_ended;
+		switch (c) {
+		case '\"': case '\\':
+			*s++ = '\\';
+			*s++ = c;
+			break;
+		case '\f':
+			*s++ = '\\';
+			*s++ = 'f';
+			break;
+		case '\n':
+			*s++ = '\\';
+			*s++ = 'n';
+			break;
+		case '\r':
+			*s++ = '\\';
+			*s++ = 'r';
+			break;
+		case '\t':
+			*s++ = '\\';
+			*s++ = 't';
+			break;
+		case '\v':
+			*s++ = '\\';
+			*s++ = 'v';
+			break;
+		default:
+			printable = is_print(c);
+
+			if (printable && escape_chars)
+				printable = !strchr(escape_chars, c);
+
+			if (printable) {
+				*s++ = c;
+			} else {
+				/* Print \octal */
+				*s++ = '\\';
+				if (i + 1 < size
+				    && ustr[i + 1] >= '0'
+				    && ustr[i + 1] <= '7'
+				) {
+					/* Print \ooo */
+					*s++ = '0' + (c >> 6);
+					*s++ = '0' + ((c >> 3) & 0x7);
+				} else {
+					/* Print \[[o]o]o */
+					if ((c >> 3) != 0) {
+						if ((c >> 6) != 0)
+							*s++ = '0' + (c >> 6);
+						*s++ = '0' + ((c >> 3) & 0x7);
 					}
-					break;
+				}
+				*s++ = '0' + (c & 0x7);
 			}
 		}
 	}
 
-	*s++ = '\"';
+ string_ended:
+	if (!(style & QUOTE_OMIT_LEADING_TRAILING_QUOTES))
+		*s++ = '\"';
+	if (style & QUOTE_EMIT_COMMENT)
+		s = stpcpy(s, " */");
 	*s = '\0';
 
-	/* Return nonzero if the string was unterminated.  */
-	return i == size;
+	/* Return zero if we printed entire ASCIZ string (didn't truncate it) */
+	if (style & QUOTE_0_TERMINATED && ustr[i] == '\0') {
+		/* We didn't see NUL yet (otherwise we'd jump to 'asciz_ended')
+		 * but next char is NUL.
+		 */
+		return 0;
+	}
+
+	return 1;
+
+ asciz_ended:
+	if (!(style & QUOTE_OMIT_LEADING_TRAILING_QUOTES))
+		*s++ = '\"';
+	if (style & QUOTE_EMIT_COMMENT)
+		s = stpcpy(s, " */");
+	*s = '\0';
+	/* Return zero: we printed entire ASCIZ string (didn't truncate it) */
+	return 0;
+}
+
+#ifndef ALLOCA_CUTOFF
+# define ALLOCA_CUTOFF	4032
+#endif
+#define use_alloca(n) ((n) <= ALLOCA_CUTOFF)
+
+/*
+ * Quote string `str' of length `size' and print the result.
+ *
+ * If QUOTE_0_TERMINATED `style' flag is set,
+ * treat `str' as a NUL-terminated string and
+ * quote at most (`size' - 1) bytes.
+ *
+ * If QUOTE_OMIT_LEADING_TRAILING_QUOTES `style' flag is set,
+ * do not add leading and trailing quoting symbols.
+ *
+ * Returns 0 if QUOTE_0_TERMINATED is set and NUL was seen, 1 otherwise.
+ * Note that if QUOTE_0_TERMINATED is not set, always returns 1.
+ */
+int
+print_quoted_string_ex(const char *str, unsigned int size,
+		       const unsigned int style, const char *escape_chars)
+{
+	char *buf;
+	char *outstr;
+	unsigned int alloc_size;
+	int rc;
+
+	if (size && style & QUOTE_0_TERMINATED)
+		--size;
+
+	alloc_size = 4 * size;
+	if (alloc_size / 4 != size) {
+		error_func_msg("requested %u bytes exceeds %u bytes limit",
+			       size, -1U / 4);
+		tprints("???");
+		return -1;
+	}
+	alloc_size += 1 + (style & QUOTE_OMIT_LEADING_TRAILING_QUOTES ? 0 : 2) +
+		(style & QUOTE_EMIT_COMMENT ? 7 : 0);
+
+	if (use_alloca(alloc_size)) {
+		outstr = alloca(alloc_size);
+		buf = NULL;
+	} else {
+		outstr = buf = malloc(alloc_size);
+		if (!buf) {
+			error_func_msg("memory exhausted when tried to allocate"
+				       " %u bytes", alloc_size);
+			tprints("???");
+			return -1;
+		}
+	}
+
+	rc = string_quote(str, outstr, size, style, escape_chars);
+	tprints(outstr);
+
+	free(buf);
+	return rc;
+}
+
+inline int
+print_quoted_string(const char *str, unsigned int size,
+		    const unsigned int style)
+{
+	return print_quoted_string_ex(str, size, style, NULL);
+}
+
+/*
+ * Quote a NUL-terminated string `str' of length up to `size' - 1
+ * and print the result.
+ *
+ * Returns 0 if NUL was seen, 1 otherwise.
+ */
+int
+print_quoted_cstring(const char *str, unsigned int size)
+{
+	int unterminated =
+		print_quoted_string(str, size, QUOTE_0_TERMINATED);
+
+	if (unterminated)
+		tprints("...");
+
+	return unterminated;
 }
 
 /*
  * Print path string specified by address `addr' and length `n'.
  * If path length exceeds `n', append `...' to the output.
+ *
+ * Returns the result of umovenstr.
  */
-void
-printpathn(struct tcb *tcp, long addr, int n)
+int
+printpathn(struct tcb *const tcp, const kernel_ulong_t addr, unsigned int n)
 {
+	char path[PATH_MAX];
+	int nul_seen;
+
 	if (!addr) {
-		tprintf("NULL");
-		return;
+		tprints("NULL");
+		return -1;
 	}
 
-	/* Cap path length to the path buffer size,
-	   and NUL-terminate the buffer. */
-	if (n > sizeof path - 1)
-		n = sizeof path - 1;
-	path[n] = '\0';
+	/* Cap path length to the path buffer size */
+	if (n > sizeof(path) - 1)
+		n = sizeof(path) - 1;
 
 	/* Fetch one byte more to find out whether path length > n. */
-	if (umovestr(tcp, addr, n + 1, path) < 0)
-		tprintf("%#lx", addr);
+	nul_seen = umovestr(tcp, addr, n + 1, path);
+	if (nul_seen < 0)
+		printaddr(addr);
 	else {
-		static char outstr[4*(sizeof path - 1) + sizeof "\"...\""];
-		int trunc = (path[n] != '\0');
-
-		if (trunc)
-			path[n] = '\0';
-		(void) string_quote(path, outstr, -1, n + 1);
-		if (trunc)
-			strcat(outstr, "...");
-		tprintf("%s", outstr);
+		path[n++] = !nul_seen;
+		print_quoted_cstring(path, n);
 	}
+
+	return nul_seen;
 }
 
-void
-printpath(struct tcb *tcp, long addr)
+int
+printpath(struct tcb *const tcp, const kernel_ulong_t addr)
 {
-	printpathn(tcp, addr, sizeof path - 1);
+	/* Size must correspond to char path[] size in printpathn */
+	return printpathn(tcp, addr, PATH_MAX - 1);
 }
 
 /*
  * Print string specified by address `addr' and length `len'.
- * If `len' < 0, treat the string as a NUL-terminated string.
- * If string length exceeds `max_strlen', append `...' to the output.
+ * If `user_style' has QUOTE_0_TERMINATED bit set, treat the string
+ * as a NUL-terminated string.
+ * Pass `user_style' on to `string_quote'.
+ * Append `...' to the output if either the string length exceeds `max_strlen',
+ * or QUOTE_0_TERMINATED bit is set and the string length exceeds `len'.
+ *
+ * Returns the result of umovenstr if style has QUOTE_0_TERMINATED,
+ * or the result of umoven otherwise.
  */
-void
-printstr(struct tcb *tcp, long addr, int len)
+int
+printstr_ex(struct tcb *const tcp, const kernel_ulong_t addr,
+	    const kernel_ulong_t len, const unsigned int user_style)
 {
-	static char *str = NULL;
+	static char *str;
 	static char *outstr;
-	int size;
+
+	unsigned int size;
+	unsigned int style = user_style;
+	int rc;
+	int ellipsis;
 
 	if (!addr) {
-		tprintf("NULL");
-		return;
+		tprints("NULL");
+		return -1;
 	}
 	/* Allocate static buffers if they are not allocated yet. */
-	if (!str)
-		str = malloc(max_strlen + 1);
-	if (!outstr)
-		outstr = malloc(4 * max_strlen + sizeof "\"...\"");
-	if (!str || !outstr) {
-		fprintf(stderr, "out of memory\n");
-		tprintf("%#lx", addr);
-		return;
-	}
-
-	if (len < 0) {
+	if (!str) {
+		const unsigned int outstr_size =
+			4 * max_strlen + /* for quotes and NUL */ 3;
 		/*
-		 * Treat as a NUL-terminated string: fetch one byte more
-		 * because string_quote() quotes one byte less.
+		 * We can assume that outstr_size / 4 == max_strlen
+		 * since we have a guarantee that max_strlen <= -1U / 4.
 		 */
-		size = max_strlen + 1;
-		str[max_strlen] = '\0';
-		if (umovestr(tcp, addr, size, str) < 0) {
-			tprintf("%#lx", addr);
-			return;
-		}
-	}
-	else {
-		size = MIN(len, max_strlen);
-		if (umoven(tcp, addr, size, str) < 0) {
-			tprintf("%#lx", addr);
-			return;
-		}
+
+		str = xmalloc(max_strlen + 1);
+		outstr = xmalloc(outstr_size);
 	}
 
-	if (string_quote(str, outstr, len, size) &&
-	    (len < 0 || len > max_strlen))
-		strcat(outstr, "...");
+	/* Fetch one byte more because string_quote may look one byte ahead. */
+	size = max_strlen + 1;
 
-	tprintf("%s", outstr);
+	if (size > len)
+		size = len;
+	if (style & QUOTE_0_TERMINATED)
+		rc = umovestr(tcp, addr, size, str);
+	else
+		rc = umoven(tcp, addr, size, str);
+
+	if (rc < 0) {
+		printaddr(addr);
+		return rc;
+	}
+
+	if (size > max_strlen)
+		size = max_strlen;
+	else
+		str[size] = '\xff';
+
+	/* If string_quote didn't see NUL and (it was supposed to be ASCIZ str
+	 * or we were requested to print more than -s NUM chars)...
+	 */
+	ellipsis = string_quote(str, outstr, size, style, NULL)
+		   && len
+		   && ((style & QUOTE_0_TERMINATED)
+		       || len > max_strlen);
+
+	tprints(outstr);
+	if (ellipsis)
+		tprints("...");
+
+	return rc;
 }
 
-#if HAVE_SYS_UIO_H
 void
-dumpiov(tcp, len, addr)
-struct tcb * tcp;
-int len;
-long addr;
+dumpiov_upto(struct tcb *const tcp, const int len, const kernel_ulong_t addr,
+	     kernel_ulong_t data_size)
 {
-#if defined(LINUX) && SUPPORTED_PERSONALITIES > 1
+#if ANY_WORDSIZE_LESS_THAN_KERNEL_LONG
 	union {
-		struct { u_int32_t base; u_int32_t len; } *iov32;
-		struct { u_int64_t base; u_int64_t len; } *iov64;
+		struct { uint32_t base; uint32_t len; } *iov32;
+		struct { uint64_t base; uint64_t len; } *iov64;
 	} iovu;
-#define iov iovu.iov64
-#define sizeof_iov \
-  (personality_wordsize[current_personality] == 4 \
-   ? sizeof(*iovu.iov32) : sizeof(*iovu.iov64))
-#define iov_iov_base(i) \
-  (personality_wordsize[current_personality] == 4 \
-   ? (u_int64_t) iovu.iov32[i].base : iovu.iov64[i].base)
-#define iov_iov_len(i) \
-  (personality_wordsize[current_personality] == 4 \
-   ? (u_int64_t) iovu.iov32[i].len : iovu.iov64[i].len)
+# define iov iovu.iov64
+# define sizeof_iov \
+	(current_wordsize == 4 ? (unsigned int) sizeof(*iovu.iov32)	\
+			       : (unsigned int) sizeof(*iovu.iov64))
+# define iov_iov_base(i) \
+	(current_wordsize == 4 ? (uint64_t) iovu.iov32[i].base : iovu.iov64[i].base)
+# define iov_iov_len(i) \
+	(current_wordsize == 4 ? (uint64_t) iovu.iov32[i].len : iovu.iov64[i].len)
 #else
 	struct iovec *iov;
-#define sizeof_iov sizeof(*iov)
-#define iov_iov_base(i) iov[i].iov_base
-#define iov_iov_len(i) iov[i].iov_len
+# define sizeof_iov ((unsigned int) sizeof(*iov))
+# define iov_iov_base(i) ptr_to_kulong(iov[i].iov_base)
+# define iov_iov_len(i) iov[i].iov_len
 #endif
 	int i;
-	unsigned long size;
-
-	size = sizeof_iov * (unsigned long) len;
-	if (size / sizeof_iov != len
-	    || (iov = malloc(size)) == NULL) {
-		fprintf(stderr, "out of memory\n");
+	unsigned int size = sizeof_iov * len;
+	if (size / sizeof_iov != (unsigned int) len) {
+		error_func_msg("requested %u iovec elements exceeds"
+			       " %u iovec limit", len, -1U / sizeof_iov);
 		return;
 	}
-	if (umoven(tcp, addr, size, (char *) iov) >= 0) {
+
+	iov = malloc(size);
+	if (!iov) {
+		error_func_msg("memory exhausted when tried to allocate"
+			       " %u bytes", size);
+		return;
+	}
+	if (umoven(tcp, addr, size, iov) >= 0) {
 		for (i = 0; i < len; i++) {
+			kernel_ulong_t iov_len = iov_iov_len(i);
+			if (iov_len > data_size)
+				iov_len = data_size;
+			if (!iov_len)
+				break;
+			data_size -= iov_len;
 			/* include the buffer number to make it easy to
 			 * match up the trace with the source */
-			tprintf(" * %lu bytes in buffer %d\n",
-				(unsigned long)iov_iov_len(i), i);
-			dumpstr(tcp, (long) iov_iov_base(i),
-				iov_iov_len(i));
+			tprintf(" * %" PRI_klu " bytes in buffer %d\n", iov_len, i);
+			dumpstr(tcp, iov_iov_base(i), iov_len);
 		}
 	}
-	free((char *) iov);
+	free(iov);
 #undef sizeof_iov
 #undef iov_iov_base
 #undef iov_iov_len
 #undef iov
 }
+
+#define ILOG2_ITER_(val_, ret_, bit_)					\
+	do {								\
+		typeof(ret_) shift_ =					\
+			((val_) > ((((typeof(val_)) 1)			\
+				   << (1 << (bit_))) - 1)) << (bit_);	\
+		(val_) >>= shift_;					\
+		(ret_) |= shift_;					\
+	} while (0)
+
+/**
+ * Calculate floor(log2(val)), with the exception of val == 0, for which 0
+ * is returned as well.
+ *
+ * @param val 64-bit value to calculate integer base-2 logarithm for.
+ * @return    (unsigned int) floor(log2(val)) if val > 0, 0 if val == 0.
+ */
+static inline unsigned int
+ilog2_64(uint64_t val)
+{
+	unsigned int ret = 0;
+
+	ILOG2_ITER_(val, ret, 5);
+	ILOG2_ITER_(val, ret, 4);
+	ILOG2_ITER_(val, ret, 3);
+	ILOG2_ITER_(val, ret, 2);
+	ILOG2_ITER_(val, ret, 1);
+	ILOG2_ITER_(val, ret, 0);
+
+	return ret;
+}
+
+/**
+ * Calculate floor(log2(val)), with the exception of val == 0, for which 0
+ * is returned as well.
+ *
+ * @param val 32-bit value to calculate integer base-2 logarithm for.
+ * @return    (unsigned int) floor(log2(val)) if val > 0, 0 if val == 0.
+ */
+static inline unsigned int
+ilog2_32(uint32_t val)
+{
+	unsigned int ret = 0;
+
+	ILOG2_ITER_(val, ret, 4);
+	ILOG2_ITER_(val, ret, 3);
+	ILOG2_ITER_(val, ret, 2);
+	ILOG2_ITER_(val, ret, 1);
+	ILOG2_ITER_(val, ret, 0);
+
+	return ret;
+}
+
+#undef ILOG2_ITER_
+
+#if SIZEOF_KERNEL_LONG_T > 4
+# define ilog2_klong ilog2_64
+#else
+# define ilog2_klong ilog2_32
 #endif
 
 void
-dumpstr(tcp, addr, len)
-struct tcb *tcp;
-long addr;
-int len;
+dumpstr(struct tcb *const tcp, const kernel_ulong_t addr,
+	const kernel_ulong_t len)
 {
-	static int strsize = -1;
-	static unsigned char *str;
-	static char outstr[80];
-	char *s;
-	int i, j;
+	/* xx xx xx xx xx xx xx xx  xx xx xx xx xx xx xx xx  1234567890123456 */
+	enum {
+		HEX_BIT = 4,
 
-	if (strsize < len) {
-		if (str)
-			free(str);
-		if ((str = malloc(len)) == NULL) {
-			fprintf(stderr, "out of memory\n");
+		DUMPSTR_GROUP_BYTES = 8,
+		DUMPSTR_GROUPS = 2,
+		DUMPSTR_WIDTH_BYTES = DUMPSTR_GROUP_BYTES * DUMPSTR_GROUPS,
+
+		/** Width of formatted dump in characters.  */
+		DUMPSTR_WIDTH_CHARS = DUMPSTR_WIDTH_BYTES +
+			sizeof("xx") * DUMPSTR_WIDTH_BYTES + DUMPSTR_GROUPS,
+
+		DUMPSTR_GROUP_MASK = DUMPSTR_GROUP_BYTES - 1,
+		DUMPSTR_BYTES_MASK = DUMPSTR_WIDTH_BYTES - 1,
+
+		/** Minimal width of the offset field in the output.  */
+		DUMPSTR_OFFS_MIN_CHARS = 5,
+
+		/** Arbitrarily chosen internal dumpstr buffer limit.  */
+		DUMPSTR_BUF_MAXSZ = 1 << 16,
+	};
+
+	static_assert(!(DUMPSTR_BUF_MAXSZ % DUMPSTR_WIDTH_BYTES),
+		      "Maximum internal buffer size should be divisible "
+		      "by amount of bytes dumped per line");
+	static_assert(!(DUMPSTR_GROUP_BYTES & DUMPSTR_GROUP_MASK),
+		      "DUMPSTR_GROUP_BYTES is not power of 2");
+	static_assert(!(DUMPSTR_WIDTH_BYTES & DUMPSTR_BYTES_MASK),
+		      "DUMPSTR_WIDTH_BYTES is not power of 2");
+
+	if (len > len + DUMPSTR_WIDTH_BYTES || addr + len < addr) {
+		debug_func_msg("len %" PRI_klu " at addr %#" PRI_klx
+			       " is too big, skipped", len, addr);
+		return;
+	}
+
+	static kernel_ulong_t strsize;
+	static unsigned char *str;
+
+	const kernel_ulong_t alloc_size =
+		MIN(ROUNDUP(len, DUMPSTR_WIDTH_BYTES), DUMPSTR_BUF_MAXSZ);
+
+	if (strsize < alloc_size) {
+		free(str);
+		str = malloc(alloc_size);
+		if (!str) {
+			strsize = 0;
+			error_func_msg("memory exhausted when tried to allocate"
+				       " %" PRI_klu " bytes", alloc_size);
 			return;
 		}
-		strsize = len;
+		strsize = alloc_size;
 	}
 
-	if (umoven(tcp, addr, len, (char *) str) < 0)
-		return;
-
-	for (i = 0; i < len; i += 16) {
-		s = outstr;
-		sprintf(s, " | %05x ", i);
-		s += 9;
-		for (j = 0; j < 16; j++) {
-			if (j == 8)
-				*s++ = ' ';
-			if (i + j < len) {
-				sprintf(s, " %02x", str[i + j]);
-				s += 3;
-			}
-			else {
-				*s++ = ' '; *s++ = ' '; *s++ = ' ';
-			}
-		}
-		*s++ = ' '; *s++ = ' ';
-		for (j = 0; j < 16; j++) {
-			if (j == 8)
-				*s++ = ' ';
-			if (i + j < len) {
-				if (isprint(str[i + j]))
-					*s++ = str[i + j];
-				else
-					*s++ = '.';
-			}
-			else
-				*s++ = ' ';
-		}
-		tprintf("%s |\n", outstr);
-	}
-}
-
-#define PAGMASK	(~(PAGSIZ - 1))
-/*
- * move `len' bytes of data from process `pid'
- * at address `addr' to our space at `laddr'
- */
-int
-umoven(struct tcb *tcp, long addr, int len, char *laddr)
-{
-#ifdef LINUX
-	int pid = tcp->pid;
-	int n, m;
-	int started = 0;
-	union {
-		long val;
-		char x[sizeof(long)];
-	} u;
-
-	if (addr & (sizeof(long) - 1)) {
-		/* addr not a multiple of sizeof(long) */
-		n = addr - (addr & -sizeof(long)); /* residue */
-		addr &= -sizeof(long); /* residue */
-		errno = 0;
-		u.val = ptrace(PTRACE_PEEKDATA, pid, (char *) addr, 0);
-		if (errno) {
-			if (started && (errno==EPERM || errno==EIO)) {
-				/* Ran into 'end of memory' - stupid "printpath" */
-				return 0;
-			}
-			/* But if not started, we had a bogus address. */
-			if (addr != 0 && errno != EIO && errno != ESRCH)
-				perror("ptrace: umoven");
-			return -1;
-		}
-		started = 1;
-		memcpy(laddr, &u.x[n], m = MIN(sizeof(long) - n, len));
-		addr += sizeof(long), laddr += m, len -= m;
-	}
-	while (len) {
-		errno = 0;
-		u.val = ptrace(PTRACE_PEEKDATA, pid, (char *) addr, 0);
-		if (errno) {
-			if (started && (errno==EPERM || errno==EIO)) {
-				/* Ran into 'end of memory' - stupid "printpath" */
-				return 0;
-			}
-			if (addr != 0 && errno != EIO && errno != ESRCH)
-				perror("ptrace: umoven");
-			return -1;
-		}
-		started = 1;
-		memcpy(laddr, u.x, m = MIN(sizeof(long), len));
-		addr += sizeof(long), laddr += m, len -= m;
-	}
-#endif /* LINUX */
-
-#ifdef SUNOS4
-	int pid = tcp->pid;
-	int n;
-
-	while (len) {
-		n = MIN(len, PAGSIZ);
-		n = MIN(n, ((addr + PAGSIZ) & PAGMASK) - addr);
-		if (ptrace(PTRACE_READDATA, pid,
-			   (char *) addr, len, laddr) < 0) {
-			if (errno != ESRCH) {
-				perror("umoven: ptrace(PTRACE_READDATA, ...)");
-				abort();
-			}
-			return -1;
-		}
-		len -= n;
-		addr += n;
-		laddr += n;
-	}
-#endif /* SUNOS4 */
-
-#ifdef USE_PROCFS
-#ifdef HAVE_MP_PROCFS
-	int fd = tcp->pfd_as;
-#else
-	int fd = tcp->pfd;
-#endif
-	lseek(fd, addr, SEEK_SET);
-	if (read(fd, laddr, len) == -1)
-		return -1;
-#endif /* USE_PROCFS */
-
-	return 0;
-}
-
-/*
- * like `umove' but make the additional effort of looking
- * for a terminating zero byte.
- */
-int
-umovestr(struct tcb *tcp, long addr, int len, char *laddr)
-{
-#ifdef USE_PROCFS
-#ifdef HAVE_MP_PROCFS
-	int fd = tcp->pfd_as;
-#else
-	int fd = tcp->pfd;
-#endif
-	/* Some systems (e.g. FreeBSD) can be upset if we read off the
-	   end of valid memory,  avoid this by trying to read up
-	   to page boundaries.  But we don't know what a page is (and
-	   getpagesize(2) (if it exists) doesn't necessarily return
-	   hardware page size).  Assume all pages >= 1024 (a-historical
-	   I know) */
-
-	int page = 1024; 	/* How to find this? */
-	int move = page - (addr & (page - 1));
-	int left = len;
-
-	lseek(fd, addr, SEEK_SET);
-
-	while (left) {
-		if (move > left) move = left;
-		if ((move = read(fd, laddr, move)) <= 0)
-			return left != len ? 0 : -1;
-		if (memchr (laddr, 0, move)) break;
-		left -= move;
-		laddr += move;
-		addr += move;
-		move = page;
-	}
-#else /* !USE_PROCFS */
-	int started = 0;
-	int pid = tcp->pid;
-	int i, n, m;
-	union {
-		long val;
-		char x[sizeof(long)];
-	} u;
-
-	if (addr & (sizeof(long) - 1)) {
-		/* addr not a multiple of sizeof(long) */
-		n = addr - (addr & -sizeof(long)); /* residue */
-		addr &= -sizeof(long); /* residue */
-		errno = 0;
-		u.val = ptrace(PTRACE_PEEKDATA, pid, (char *)addr, 0);
-		if (errno) {
-			if (started && (errno==EPERM || errno==EIO)) {
-				/* Ran into 'end of memory' - stupid "printpath" */
-				return 0;
-			}
-			if (addr != 0 && errno != EIO && errno != ESRCH)
-				perror("umovestr");
-			return -1;
-		}
-		started = 1;
-		memcpy(laddr, &u.x[n], m = MIN(sizeof(long)-n,len));
-		while (n & (sizeof(long) - 1))
-			if (u.x[n++] == '\0')
-				return 0;
-		addr += sizeof(long), laddr += m, len -= m;
-	}
-	while (len) {
-		errno = 0;
-		u.val = ptrace(PTRACE_PEEKDATA, pid, (char *)addr, 0);
-		if (errno) {
-			if (started && (errno==EPERM || errno==EIO)) {
-				/* Ran into 'end of memory' - stupid "printpath" */
-				return 0;
-			}
-			if (addr != 0 && errno != EIO && errno != ESRCH)
-				perror("umovestr");
-			return -1;
-		}
-		started = 1;
-		memcpy(laddr, u.x, m = MIN(sizeof(long), len));
-		for (i = 0; i < sizeof(long); i++)
-			if (u.x[i] == '\0')
-				return 0;
-
-		addr += sizeof(long), laddr += m, len -= m;
-	}
-#endif /* !USE_PROCFS */
-	return 0;
-}
-
-#ifdef LINUX
-# if !defined (SPARC) && !defined(SPARC64)
-#  define PTRACE_WRITETEXT	101
-#  define PTRACE_WRITEDATA	102
-# endif /* !SPARC && !SPARC64 */
-#endif /* LINUX */
-
-#ifdef SUNOS4
-
-static int
-uload(cmd, pid, addr, len, laddr)
-int cmd;
-int pid;
-long addr;
-int len;
-char *laddr;
-{
-	int peek, poke;
-	int n, m;
-	union {
-		long val;
-		char x[sizeof(long)];
-	} u;
-
-	if (cmd == PTRACE_WRITETEXT) {
-		peek = PTRACE_PEEKTEXT;
-		poke = PTRACE_POKETEXT;
-	}
-	else {
-		peek = PTRACE_PEEKDATA;
-		poke = PTRACE_POKEDATA;
-	}
-	if (addr & (sizeof(long) - 1)) {
-		/* addr not a multiple of sizeof(long) */
-		n = addr - (addr & -sizeof(long)); /* residue */
-		addr &= -sizeof(long);
-		errno = 0;
-		u.val = ptrace(peek, pid, (char *) addr, 0);
-		if (errno) {
-			perror("uload: POKE");
-			return -1;
-		}
-		memcpy(&u.x[n], laddr, m = MIN(sizeof(long) - n, len));
-		if (ptrace(poke, pid, (char *)addr, u.val) < 0) {
-			perror("uload: POKE");
-			return -1;
-		}
-		addr += sizeof(long), laddr += m, len -= m;
-	}
-	while (len) {
-		if (len < sizeof(long))
-			u.val = ptrace(peek, pid, (char *) addr, 0);
-		memcpy(u.x, laddr, m = MIN(sizeof(long), len));
-		if (ptrace(poke, pid, (char *) addr, u.val) < 0) {
-			perror("uload: POKE");
-			return -1;
-		}
-		addr += sizeof(long), laddr += m, len -= m;
-	}
-	return 0;
-}
-
-int
-tload(pid, addr, len, laddr)
-int pid;
-int addr, len;
-char *laddr;
-{
-	return uload(PTRACE_WRITETEXT, pid, addr, len, laddr);
-}
-
-int
-dload(pid, addr, len, laddr)
-int pid;
-int addr;
-int len;
-char *laddr;
-{
-	return uload(PTRACE_WRITEDATA, pid, addr, len, laddr);
-}
-
-#endif /* SUNOS4 */
-
-#ifndef USE_PROCFS
-
-int
-upeek(tcp, off, res)
-struct tcb *tcp;
-long off;
-long *res;
-{
-	long val;
-
-# ifdef SUNOS4_KERNEL_ARCH_KLUDGE
-	{
-		static int is_sun4m = -1;
-		struct utsname name;
-
-		/* Round up the usual suspects. */
-		if (is_sun4m == -1) {
-			if (uname(&name) < 0) {
-				perror("upeek: uname?");
-				exit(1);
-			}
-			is_sun4m = strcmp(name.machine, "sun4m") == 0;
-			if (is_sun4m) {
-				const struct xlat *x;
-
-				for (x = struct_user_offsets; x->str; x++)
-					x->val += 1024;
-			}
-		}
-		if (is_sun4m)
-			off += 1024;
-	}
-# endif /* SUNOS4_KERNEL_ARCH_KLUDGE */
-	errno = 0;
-	val = do_ptrace(PTRACE_PEEKUSER, tcp, (char *) off, 0);
-	if (val == -1 && errno) {
-		if (errno != ESRCH) {
-			char buf[60];
-			sprintf(buf,"upeek: ptrace(PTRACE_PEEKUSER,%d,%lu,0)", tcp->pid, off);
-			perror(buf);
-		}
-		return -1;
-	}
-	*res = val;
-	return 0;
-}
-
-#endif /* !USE_PROCFS */
-
-void
-printcall(struct tcb *tcp)
-{
-#define PRINTBADPC tprintf(sizeof(long) == 4 ? "[????????] " : \
-			   sizeof(long) == 8 ? "[????????????????] " : \
-			   NULL /* crash */)
-
-#ifdef LINUX
-# ifdef I386
-	long eip;
-
-	if (upeek(tcp, 4*EIP, &eip) < 0) {
-		PRINTBADPC;
-		return;
-	}
-	tprintf("[%08lx] ", eip);
-
-# elif defined(S390) || defined(S390X)
-	long psw;
-	if(upeek(tcp,PT_PSWADDR,&psw) < 0) {
-		PRINTBADPC;
-		return;
-	}
-#  ifdef S390
-	tprintf("[%08lx] ", psw);
-#  elif S390X
-	tprintf("[%16lx] ", psw);
-#  endif
-
-# elif defined(X86_64)
-	long rip;
-
-	if (upeek(tcp, 8*RIP, &rip) < 0) {
-		PRINTBADPC;
-		return;
-	}
-	tprintf("[%16lx] ", rip);
-# elif defined(IA64)
-	long ip;
-
-	if (upeek(tcp, PT_B0, &ip) < 0) {
-		PRINTBADPC;
-		return;
-	}
-	tprintf("[%08lx] ", ip);
-# elif defined(POWERPC)
-	long pc;
-
-	if (upeek(tcp, sizeof(unsigned long)*PT_NIP, &pc) < 0) {
-		PRINTBADPC;
-		return;
-	}
-#  ifdef POWERPC64
-	tprintf("[%016lx] ", pc);
-#  else
-	tprintf("[%08lx] ", pc);
-#  endif
-# elif defined(M68K)
-	long pc;
-
-	if (upeek(tcp, 4*PT_PC, &pc) < 0) {
-		tprintf ("[????????] ");
-		return;
-	}
-	tprintf("[%08lx] ", pc);
-# elif defined(ALPHA)
-	long pc;
-
-	if (upeek(tcp, REG_PC, &pc) < 0) {
-		tprintf ("[????????????????] ");
-		return;
-	}
-	tprintf("[%08lx] ", pc);
-# elif defined(SPARC) || defined(SPARC64)
-	struct pt_regs regs;
-	if (ptrace(PTRACE_GETREGS,tcp->pid,(char *)&regs,0) < 0) {
-		PRINTBADPC;
-		return;
-	}
-#  if defined(SPARC64)
-	tprintf("[%08lx] ", regs.tpc);
-#  else
-	tprintf("[%08lx] ", regs.pc);
-#  endif
-# elif defined(HPPA)
-	long pc;
-
-	if(upeek(tcp,PT_IAOQ0,&pc) < 0) {
-		tprintf ("[????????] ");
-		return;
-	}
-	tprintf("[%08lx] ", pc);
-# elif defined(MIPS)
-	long pc;
-
-	if (upeek(tcp, REG_EPC, &pc) < 0) {
-		tprintf ("[????????] ");
-		return;
-	}
-	tprintf("[%08lx] ", pc);
-# elif defined(SH)
-	long pc;
-
-	if (upeek(tcp, 4*REG_PC, &pc) < 0) {
-		tprintf ("[????????] ");
-		return;
-	}
-	tprintf("[%08lx] ", pc);
-# elif defined(SH64)
-	long pc;
-
-	if (upeek(tcp, REG_PC, &pc) < 0) {
-		tprintf ("[????????????????] ");
-		return;
-	}
-	tprintf("[%08lx] ", pc);
-# elif defined(ARM)
-	long pc;
-
-	if (upeek(tcp, 4*15, &pc) < 0) {
-		PRINTBADPC;
-		return;
-	}
-	tprintf("[%08lx] ", pc);
-# elif defined(AVR32)
-	long pc;
-
-	if (upeek(tcp, REG_PC, &pc) < 0) {
-		tprintf("[????????] ");
-		return;
-	}
-	tprintf("[%08lx] ", pc);
-# elif defined(BFIN)
-	long pc;
-
-	if (upeek(tcp, PT_PC, &pc) < 0) {
-		PRINTBADPC;
-		return;
-	}
-	tprintf("[%08lx] ", pc);
-#elif defined(CRISV10)
-	long pc;
-
-	if (upeek(tcp, 4*PT_IRP, &pc) < 0) {
-		PRINTBADPC;
-		return;
-	}
-	tprintf("[%08lx] ", pc);
-#elif defined(CRISV32)
-	long pc;
-
-	if (upeek(tcp, 4*PT_ERP, &pc) < 0) {
-		PRINTBADPC;
-		return;
-	}
-	tprintf("[%08lx] ", pc);
-# endif /* architecture */
-#endif /* LINUX */
-
-#ifdef SUNOS4
-	struct regs regs;
-
-	if (ptrace(PTRACE_GETREGS, tcp->pid, (char *) &regs, 0) < 0) {
-		perror("printcall: ptrace(PTRACE_GETREGS, ...)");
-		PRINTBADPC;
-		return;
-	}
-	tprintf("[%08x] ", regs.r_o7);
-#endif /* SUNOS4 */
-
-#ifdef SVR4
-	/* XXX */
-	PRINTBADPC;
-#endif
-
-#ifdef FREEBSD
-	struct reg regs;
-	pread(tcp->pfd_reg, &regs, sizeof(regs), 0);
-	tprintf("[%08x] ", regs.r_eip);
-#endif /* FREEBSD */
-}
-
-
-/*
- * These #if's are huge, please indent them correctly.
- * It's easy to get confused otherwise.
- */
-#ifndef USE_PROCFS
-
-#ifdef LINUX
-
-#  include "syscall.h"
-
-#  include <sys/syscall.h>
-#  ifndef CLONE_PTRACE
-#   define CLONE_PTRACE    0x00002000
-#  endif
-#  ifndef CLONE_VFORK
-#   define CLONE_VFORK     0x00004000
-#  endif
-#  ifndef CLONE_VM
-#   define CLONE_VM        0x00000100
-#  endif
-#  ifndef CLONE_STOPPED
-#   define CLONE_STOPPED   0x02000000
-#  endif
-
-#  ifdef IA64
-
-/* We don't have fork()/vfork() syscalls on ia64 itself, but the ia32
-   subsystem has them for x86... */
-#   define SYS_fork	2
-#   define SYS_vfork	190
-
-typedef unsigned long *arg_setup_state;
-
-static int
-arg_setup(struct tcb *tcp, arg_setup_state *state)
-{
-	unsigned long cfm, sof, sol;
-	long bsp;
-
-	if (ia32) {
-		/* Satisfy a false GCC warning.  */
-		*state = NULL;
-		return 0;
-	}
-
-	if (upeek(tcp, PT_AR_BSP, &bsp) < 0)
-		return -1;
-	if (upeek(tcp, PT_CFM, (long *) &cfm) < 0)
-		return -1;
-
-	sof = (cfm >> 0) & 0x7f;
-	sol = (cfm >> 7) & 0x7f;
-	bsp = (long) ia64_rse_skip_regs((unsigned long *) bsp, -sof + sol);
-
-	*state = (unsigned long *) bsp;
-	return 0;
-}
-
-#   define arg_finish_change(tcp, state)	0
-
-#   ifdef SYS_fork
-static int
-get_arg0 (struct tcb *tcp, arg_setup_state *state, long *valp)
-{
-	int ret;
-
-	if (ia32)
-		ret = upeek (tcp, PT_R11, valp);
-	else
-		ret = umoven (tcp,
-			      (unsigned long) ia64_rse_skip_regs(*state, 0),
-			      sizeof(long), (void *) valp);
-	return ret;
-}
-
-static int
-get_arg1 (struct tcb *tcp, arg_setup_state *state, long *valp)
-{
-	int ret;
-
-	if (ia32)
-		ret = upeek (tcp, PT_R9, valp);
-	else
-		ret = umoven (tcp,
-			      (unsigned long) ia64_rse_skip_regs(*state, 1),
-			      sizeof(long), (void *) valp);
-	return ret;
-}
-#   endif
-
-static int
-set_arg0 (struct tcb *tcp, arg_setup_state *state, long val)
-{
-	int req = PTRACE_POKEDATA;
-	void *ap;
-
-	if (ia32) {
-		ap = (void *) (intptr_t) PT_R11;	 /* r11 == EBX */
-		req = PTRACE_POKEUSER;
-	} else
-		ap = ia64_rse_skip_regs(*state, 0);
-	errno = 0;
-	ptrace(req, tcp->pid, ap, val);
-	return errno ? -1 : 0;
-}
-
-static int
-set_arg1 (struct tcb *tcp, arg_setup_state *state, long val)
-{
-	int req = PTRACE_POKEDATA;
-	void *ap;
-
-	if (ia32) {
-		ap = (void *) (intptr_t) PT_R9;		/* r9 == ECX */
-		req = PTRACE_POKEUSER;
-	} else
-		ap = ia64_rse_skip_regs(*state, 1);
-	errno = 0;
-	ptrace(req, tcp->pid, ap, val);
-	return errno ? -1 : 0;
-}
-
-/* ia64 does not return the input arguments from functions (and syscalls)
-   according to ia64 RSE (Register Stack Engine) behavior.  */
-
-#   define restore_arg0(tcp, state, val) ((void) (state), 0)
-#   define restore_arg1(tcp, state, val) ((void) (state), 0)
-
-#  elif defined (SPARC) || defined (SPARC64)
-
-typedef struct pt_regs arg_setup_state;
-
-#   define arg_setup(tcp, state) \
-    (ptrace (PTRACE_GETREGS, tcp->pid, (char *) (state), 0))
-#   define arg_finish_change(tcp, state) \
-    (ptrace (PTRACE_SETREGS, tcp->pid, (char *) (state), 0))
-
-#   define get_arg0(tcp, state, valp) (*(valp) = (state)->u_regs[U_REG_O0], 0)
-#   define get_arg1(tcp, state, valp) (*(valp) = (state)->u_regs[U_REG_O1], 0)
-#   define set_arg0(tcp, state, val) ((state)->u_regs[U_REG_O0] = (val), 0)
-#   define set_arg1(tcp, state, val) ((state)->u_regs[U_REG_O1] = (val), 0)
-#   define restore_arg0(tcp, state, val) 0
-
-#  else /* other architectures */
-
-#   if defined S390 || defined S390X
-/* Note: this is only true for the `clone' system call, which handles
-   arguments specially.  We could as well say that its first two arguments
-   are swapped relative to other architectures, but that would just be
-   another #ifdef in the calls.  */
-#    define arg0_offset	PT_GPR3
-#    define arg1_offset	PT_ORIGGPR2
-#    define restore_arg0(tcp, state, val) ((void) (state), 0)
-#    define restore_arg1(tcp, state, val) ((void) (state), 0)
-#    define arg0_index	1
-#    define arg1_index	0
-#   elif defined (ALPHA) || defined (MIPS)
-#    define arg0_offset	REG_A0
-#    define arg1_offset	(REG_A0+1)
-#   elif defined (AVR32)
-#    define arg0_offset	(REG_R12)
-#    define arg1_offset	(REG_R11)
-#   elif defined (POWERPC)
-#    define arg0_offset	(sizeof(unsigned long)*PT_R3)
-#    define arg1_offset	(sizeof(unsigned long)*PT_R4)
-#    define restore_arg0(tcp, state, val) ((void) (state), 0)
-#   elif defined (HPPA)
-#    define arg0_offset	 PT_GR26
-#    define arg1_offset	 (PT_GR26-4)
-#   elif defined (X86_64)
-#    define arg0_offset	((long)(8*(current_personality ? RBX : RDI)))
-#    define arg1_offset	((long)(8*(current_personality ? RCX : RSI)))
-#   elif defined (SH)
-#    define arg0_offset	(4*(REG_REG0+4))
-#    define arg1_offset	(4*(REG_REG0+5))
-#   elif defined (SH64)
-    /* ABI defines arg0 & 1 in r2 & r3 */
-#    define arg0_offset   (REG_OFFSET+16)
-#    define arg1_offset   (REG_OFFSET+24)
-#    define restore_arg0(tcp, state, val) 0
-#   elif defined CRISV10 || defined CRISV32
-#    define arg0_offset   (4*PT_R11)
-#    define arg1_offset   (4*PT_ORIG_R10)
-#    define restore_arg0(tcp, state, val) 0
-#    define restore_arg1(tcp, state, val) 0
-#    define arg0_index   1
-#    define arg1_index   0
-#   else
-#    define arg0_offset	0
-#    define arg1_offset	4
-#    if defined ARM
-#     define restore_arg0(tcp, state, val) 0
-#    endif
-#   endif
-
-typedef int arg_setup_state;
-
-#   define arg_setup(tcp, state) (0)
-#   define arg_finish_change(tcp, state)	0
-#   define get_arg0(tcp, cookie, valp) \
-    (upeek ((tcp), arg0_offset, (valp)))
-#   define get_arg1(tcp, cookie, valp) \
-    (upeek ((tcp), arg1_offset, (valp)))
-
-static int
-set_arg0 (struct tcb *tcp, void *cookie, long val)
-{
-	return ptrace (PTRACE_POKEUSER, tcp->pid, (char*)arg0_offset, val);
-}
-
-static int
-set_arg1 (struct tcb *tcp, void *cookie, long val)
-{
-	return ptrace (PTRACE_POKEUSER, tcp->pid, (char*)arg1_offset, val);
-}
-
-#  endif /* architectures */
-
-#  ifndef restore_arg0
-#   define restore_arg0(tcp, state, val) set_arg0((tcp), (state), (val))
-#  endif
-#  ifndef restore_arg1
-#   define restore_arg1(tcp, state, val) set_arg1((tcp), (state), (val))
-#  endif
-
-#  ifndef arg0_index
-#   define arg0_index 0
-#   define arg1_index 1
-#  endif
-
-int
-setbpt(struct tcb *tcp)
-{
-	static int clone_scno[SUPPORTED_PERSONALITIES] = { SYS_clone };
-	arg_setup_state state;
-
-	if (tcp->flags & TCB_BPTSET) {
-		fprintf(stderr, "PANIC: TCB already set in pid %u\n", tcp->pid);
-		return -1;
-	}
-
-	/*
-	 * It's a silly kludge to initialize this with a search at runtime.
-	 * But it's better than maintaining another magic thing in the
-	 * godforsaken tables.
+	/**
+	 * Characters needed in order to print the offset field. We calculate
+	 * it this way in order to avoid ilog2_64 call most of the time.
 	 */
-	if (clone_scno[current_personality] == 0) {
-		int i;
-		for (i = 0; i < nsyscalls; ++i)
-			if (sysent[i].sys_func == sys_clone) {
-				clone_scno[current_personality] = i;
-				break;
+	const int offs_chars = len > (1 << (DUMPSTR_OFFS_MIN_CHARS * HEX_BIT))
+		? 1 + ilog2_klong(len - 1) / HEX_BIT : DUMPSTR_OFFS_MIN_CHARS;
+	kernel_ulong_t i = 0;
+	const unsigned char *src;
+
+	while (i < len) {
+		/*
+		 * It is important to overwrite all the byte values, as we
+		 * re-use the buffer in order to avoid its re-initialisation.
+		 */
+		static char outbuf[] = {
+			[0 ... DUMPSTR_WIDTH_CHARS - 1] = ' ',
+			'\0'
+		};
+		char *dst = outbuf;
+
+		/* Fetching data from tracee.  */
+		if (!i || (i % DUMPSTR_BUF_MAXSZ) == 0) {
+			kernel_ulong_t fetch_size = MIN(len - i, alloc_size);
+
+			if (umoven(tcp, addr + i, fetch_size, str) < 0) {
+				/*
+				 * Don't silently abort if we have printed
+				 * something already.
+				 */
+				if (i)
+					tprintf(" | <Cannot fetch %" PRI_klu
+						" byte%s from pid %d"
+						" @%#" PRI_klx ">\n",
+						fetch_size,
+						fetch_size == 1 ? "" : "s",
+						tcp->pid, addr + i);
+				return;
 			}
+			src = str;
+		}
+
+		/* hex dump */
+		do {
+			if (i < len) {
+				dst = sprint_byte_hex(dst, *src);
+			} else {
+				*dst++ = ' ';
+				*dst++ = ' ';
+			}
+			dst++; /* space is there */
+			i++;
+			if ((i & DUMPSTR_GROUP_MASK) == 0)
+				dst++; /* space is there */
+			src++;
+		} while (i & DUMPSTR_BYTES_MASK);
+
+		/* ASCII dump */
+		i -= DUMPSTR_WIDTH_BYTES;
+		src -= DUMPSTR_WIDTH_BYTES;
+		do {
+			if (i < len) {
+				if (is_print(*src))
+					*dst++ = *src;
+				else
+					*dst++ = '.';
+			} else {
+				*dst++ = ' ';
+			}
+			src++;
+		} while (++i & DUMPSTR_BYTES_MASK);
+
+		tprintf(" | %0*" PRI_klx "  %s |\n",
+			offs_chars, i - DUMPSTR_WIDTH_BYTES, outbuf);
 	}
+}
 
-	switch (known_scno(tcp)) {
-#  ifdef SYS_vfork
-	case SYS_vfork:
-#  endif
-#  ifdef SYS_fork
-	case SYS_fork:
-#  endif
-#  if defined SYS_fork || defined SYS_vfork
-		if (arg_setup (tcp, &state) < 0
-		    || get_arg0 (tcp, &state, &tcp->inst[0]) < 0
-		    || get_arg1 (tcp, &state, &tcp->inst[1]) < 0
-		    || change_syscall(tcp, clone_scno[current_personality]) < 0
-		    || set_arg0 (tcp, &state, CLONE_PTRACE|SIGCHLD) < 0
-		    || set_arg1 (tcp, &state, 0) < 0
-		    || arg_finish_change (tcp, &state) < 0)
-			return -1;
-		tcp->u_arg[arg0_index] = CLONE_PTRACE|SIGCHLD;
-		tcp->u_arg[arg1_index] = 0;
-		tcp->flags |= TCB_BPTSET;
+bool
+tfetch_mem64(struct tcb *const tcp, const uint64_t addr,
+	     const unsigned int len, void *const our_addr)
+{
+	return addr && verbose(tcp) &&
+	       (entering(tcp) || !syserror(tcp)) &&
+	       !umoven(tcp, addr, len, our_addr);
+}
+
+bool
+tfetch_mem64_ignore_syserror(struct tcb *const tcp, const uint64_t addr,
+			     const unsigned int len, void *const our_addr)
+{
+	return addr && verbose(tcp) &&
+	       !umoven(tcp, addr, len, our_addr);
+}
+
+int
+umoven_or_printaddr64(struct tcb *const tcp, const uint64_t addr,
+		      const unsigned int len, void *const our_addr)
+{
+	if (tfetch_mem64(tcp, addr, len, our_addr))
 		return 0;
-#  endif
-
-	case SYS_clone:
-#  ifdef SYS_clone2
-	case SYS_clone2:
-#  endif
-		/* ia64 calls directly `clone (CLONE_VFORK | CLONE_VM)'
-		   contrary to x86 SYS_vfork above.  Even on x86 we turn the
-		   vfork semantics into plain fork - each application must not
-		   depend on the vfork specifics according to POSIX.  We would
-		   hang waiting for the parent resume otherwise.  We need to
-		   clear also CLONE_VM but only in the CLONE_VFORK case as
-		   otherwise we would break pthread_create.  */
-
-		if ((arg_setup (tcp, &state) < 0
-		    || set_arg0 (tcp, &state,
-				 (tcp->u_arg[arg0_index] | CLONE_PTRACE)
-				 & ~(tcp->u_arg[arg0_index] & CLONE_VFORK
-				     ? CLONE_VFORK | CLONE_VM : 0)) < 0
-		    || arg_finish_change (tcp, &state) < 0))
-			return -1;
-		tcp->flags |= TCB_BPTSET;
-		tcp->inst[0] = tcp->u_arg[arg0_index];
-		tcp->inst[1] = tcp->u_arg[arg1_index];
-		return 0;
-
-	default:
-		fprintf(stderr, "PANIC: setbpt for syscall %ld on %u???\n",
-			tcp->scno, tcp->pid);
-		break;
-	}
-
+	printaddr64(addr);
 	return -1;
 }
 
 int
-clearbpt(tcp)
-struct tcb *tcp;
+umoven_or_printaddr64_ignore_syserror(struct tcb *const tcp,
+				      const uint64_t addr,
+				      const unsigned int len,
+				      void *const our_addr)
 {
-	arg_setup_state state;
-	if (arg_setup (tcp, &state) < 0
-	    || restore_arg0 (tcp, &state, tcp->inst[0]) < 0
-	    || restore_arg1 (tcp, &state, tcp->inst[1]) < 0
-	    || arg_finish_change (tcp, &state))
-		if (errno != ESRCH) return -1;
-	tcp->flags &= ~TCB_BPTSET;
-	return 0;
-}
-
-# else /* !defined LINUX */
-
-int
-setbpt(tcp)
-struct tcb *tcp;
-{
-#  ifdef SUNOS4
-#   ifdef SPARC	/* This code is slightly sparc specific */
-
-	struct regs regs;
-#    define BPT	0x91d02001	/* ta	1 */
-#    define LOOP	0x10800000	/* ba	0 */
-#    define LOOPA	0x30800000	/* ba,a	0 */
-#    define NOP	0x01000000
-#    if LOOPA
-	static int loopdeloop[1] = {LOOPA};
-#    else
-	static int loopdeloop[2] = {LOOP, NOP};
-#    endif
-
-	if (tcp->flags & TCB_BPTSET) {
-		fprintf(stderr, "PANIC: TCB already set in pid %u\n", tcp->pid);
-		return -1;
-	}
-	if (ptrace(PTRACE_GETREGS, tcp->pid, (char *)&regs, 0) < 0) {
-		perror("setbpt: ptrace(PTRACE_GETREGS, ...)");
-		return -1;
-	}
-	tcp->baddr = regs.r_o7 + 8;
-	if (ptrace(PTRACE_READTEXT, tcp->pid, (char *)tcp->baddr,
-				sizeof tcp->inst, (char *)tcp->inst) < 0) {
-		perror("setbpt: ptrace(PTRACE_READTEXT, ...)");
-		return -1;
-	}
-
-	/*
-	 * XXX - BRUTAL MODE ON
-	 * We cannot set a real BPT in the child, since it will not be
-	 * traced at the moment it will reach the trap and would probably
-	 * die with a core dump.
-	 * Thus, we are force our way in by taking out two instructions
-	 * and insert an eternal loop in stead, in expectance of the SIGSTOP
-	 * generated by out PTRACE_ATTACH.
-	 * Of cause, if we evaporate ourselves in the middle of all this...
-	 */
-	if (ptrace(PTRACE_WRITETEXT, tcp->pid, (char *) tcp->baddr,
-			sizeof loopdeloop, (char *) loopdeloop) < 0) {
-		perror("setbpt: ptrace(PTRACE_WRITETEXT, ...)");
-		return -1;
-	}
-	tcp->flags |= TCB_BPTSET;
-
-#   endif /* SPARC */
-#  endif /* SUNOS4 */
-
-	return 0;
-}
-
-int
-clearbpt(tcp)
-struct tcb *tcp;
-{
-#  ifdef SUNOS4
-#   ifdef SPARC
-
-#    if !LOOPA
-	struct regs regs;
-#    endif
-
-	if (!(tcp->flags & TCB_BPTSET)) {
-		fprintf(stderr, "PANIC: TCB not set in pid %u\n", tcp->pid);
-		return -1;
-	}
-	if (ptrace(PTRACE_WRITETEXT, tcp->pid, (char *) tcp->baddr,
-				sizeof tcp->inst, (char *) tcp->inst) < 0) {
-		perror("clearbtp: ptrace(PTRACE_WRITETEXT, ...)");
-		return -1;
-	}
-	tcp->flags &= ~TCB_BPTSET;
-
-#    if !LOOPA
-	/*
-	 * Since we don't have a single instruction breakpoint, we may have
-	 * to adjust the program counter after removing our `breakpoint'.
-	 */
-	if (ptrace(PTRACE_GETREGS, tcp->pid, (char *)&regs, 0) < 0) {
-		perror("clearbpt: ptrace(PTRACE_GETREGS, ...)");
-		return -1;
-	}
-	if ((regs.r_pc < tcp->baddr) ||
-				(regs.r_pc > tcp->baddr + 4)) {
-		/* The breakpoint has not been reached yet */
-		if (debug)
-			fprintf(stderr,
-				"NOTE: PC not at bpt (pc %#x baddr %#x)\n",
-					regs.r_pc, tcp->baddr);
+	if (tfetch_mem64_ignore_syserror(tcp, addr, len, our_addr))
 		return 0;
-	}
-	if (regs.r_pc != tcp->baddr)
-		if (debug)
-			fprintf(stderr, "NOTE: PC adjusted (%#x -> %#x\n",
-				regs.r_pc, tcp->baddr);
-
-	regs.r_pc = tcp->baddr;
-	if (ptrace(PTRACE_SETREGS, tcp->pid, (char *)&regs, 0) < 0) {
-		perror("clearbpt: ptrace(PTRACE_SETREGS, ...)");
-		return -1;
-	}
-#    endif /* LOOPA */
-#   endif /* SPARC */
-#  endif /* SUNOS4 */
-
-	return 0;
+	printaddr64(addr);
+	return -1;
 }
 
-# endif /* !defined LINUX */
-
-#endif /* !USE_PROCFS */
-
-
-#ifdef SUNOS4
-
-static int
-getex(tcp, hdr)
-struct tcb *tcp;
-struct exec *hdr;
+bool
+print_int32_array_member(struct tcb *tcp, void *elem_buf, size_t elem_size,
+			 void *data)
 {
-	int n;
+	tprintf("%" PRId32, *(int32_t *) elem_buf);
 
-	for (n = 0; n < sizeof *hdr; n += 4) {
-		long res;
-		if (upeek(tcp, uoff(u_exdata) + n, &res) < 0)
-			return -1;
-		memcpy(((char *) hdr) + n, &res, 4);
-	}
-	if (debug) {
-		fprintf(stderr, "[struct exec: magic: %o version %u Mach %o\n",
-			hdr->a_magic, hdr->a_toolversion, hdr->a_machtype);
-		fprintf(stderr, "Text %lu Data %lu Bss %lu Syms %lu Entry %#lx]\n",
-			hdr->a_text, hdr->a_data, hdr->a_bss, hdr->a_syms, hdr->a_entry);
-	}
-	return 0;
+	return true;
 }
 
-int
-fixvfork(tcp)
-struct tcb *tcp;
+bool
+print_uint32_array_member(struct tcb *tcp, void *elem_buf, size_t elem_size,
+			  void *data)
 {
-	int pid = tcp->pid;
-	/*
-	 * Change `vfork' in a freshly exec'ed dynamically linked
-	 * executable's (internal) symbol table to plain old `fork'
-	 */
+	tprintf("%" PRIu32, *(uint32_t *) elem_buf);
 
-	struct exec hdr;
-	struct link_dynamic dyn;
-	struct link_dynamic_2 ld;
-	char *strtab, *cp;
+	return true;
+}
 
-	if (getex(tcp, &hdr) < 0)
-		return -1;
-	if (!hdr.a_dynamic)
-		return -1;
+bool
+print_uint64_array_member(struct tcb *tcp, void *elem_buf, size_t elem_size,
+			  void *data)
+{
+	tprintf("%" PRIu64, *(uint64_t *) elem_buf);
 
-	if (umove(tcp, (int) N_DATADDR(hdr), &dyn) < 0) {
-		fprintf(stderr, "Cannot read DYNAMIC\n");
-		return -1;
+	return true;
+}
+
+/*
+ * Iteratively fetch and print up to nmemb elements of elem_size size
+ * from the array that starts at tracee's address start_addr.
+ *
+ * Array elements are being fetched to the address specified by elem_buf.
+ *
+ * The fetcher callback function specified by tfetch_mem_func should follow
+ * the same semantics as tfetch_mem function.
+ *
+ * The printer callback function specified by print_func is expected
+ * to print something; if it returns false, no more iterations will be made.
+ *
+ * The pointer specified by opaque_data is passed to each invocation
+ * of print_func callback function.
+ *
+ * This function prints:
+ * - "NULL", if start_addr is NULL;
+ * - "[]", if nmemb is 0;
+ * - start_addr, if nmemb * elem_size overflows or wraps around;
+ * - start_addr, if the first tfetch_mem_func invocation returned false;
+ * - elements of the array, delimited by ", ", with the array itself
+ *   enclosed with [] brackets.
+ *
+ * If abbrev(tcp) is true, then
+ * - the maximum number of elements printed equals to max_strlen;
+ * - "..." is printed instead of max_strlen+1 element
+ *   and no more iterations will be made.
+ *
+ * This function returns true only if tfetch_mem_func has returned true
+ * at least once.
+ */
+bool
+print_array_ex(struct tcb *const tcp,
+	       const kernel_ulong_t start_addr,
+	       const size_t nmemb,
+	       void *const elem_buf,
+	       const size_t elem_size,
+	       tfetch_mem_fn tfetch_mem_func,
+	       print_fn print_func,
+	       void *const opaque_data,
+	       unsigned int flags,
+	       const struct xlat *index_xlat,
+	       size_t index_xlat_size,
+	       const char *index_dflt)
+{
+	if (!start_addr) {
+		tprints("NULL");
+		return false;
 	}
-	if (umove(tcp, (int) dyn.ld_un.ld_2, &ld) < 0) {
-		fprintf(stderr, "Cannot read link_dynamic_2\n");
-		return -1;
-	}
-	if ((strtab = malloc((unsigned)ld.ld_symb_size)) == NULL) {
-		fprintf(stderr, "out of memory\n");
-		return -1;
-	}
-	if (umoven(tcp, (int)ld.ld_symbols+(int)N_TXTADDR(hdr),
-					(int)ld.ld_symb_size, strtab) < 0)
-		goto err;
 
-	for (cp = strtab; cp < strtab + ld.ld_symb_size; ) {
-		if (strcmp(cp, "_vfork") == 0) {
-			if (debug)
-				fprintf(stderr, "fixvfork: FOUND _vfork\n");
-			strcpy(cp, "_fork");
+	if (!nmemb) {
+		tprints("[]");
+		return false;
+	}
+
+	const size_t size = nmemb * elem_size;
+	const kernel_ulong_t end_addr = start_addr + size;
+
+	if (end_addr <= start_addr || size / elem_size != nmemb) {
+		printaddr(start_addr);
+		return false;
+	}
+
+	const kernel_ulong_t abbrev_end =
+		(abbrev(tcp) && max_strlen < nmemb) ?
+			start_addr + elem_size * max_strlen : end_addr;
+	kernel_ulong_t cur;
+	kernel_ulong_t idx = 0;
+	enum xlat_style xlat_style = flags & XLAT_STYLE_MASK;
+
+	for (cur = start_addr; cur < end_addr; cur += elem_size, idx++) {
+		if (cur != start_addr)
+			tprints(", ");
+
+		if (!tfetch_mem_func(tcp, cur, elem_size, elem_buf)) {
+			if (cur == start_addr)
+				printaddr(cur);
+			else {
+				tprints("...");
+				printaddr_comment(cur);
+			}
 			break;
 		}
-		cp += strlen(cp)+1;
+
+		if (cur == start_addr)
+			tprints("[");
+
+		if (cur >= abbrev_end) {
+			tprints("...");
+			cur = end_addr;
+			break;
+		}
+
+		if (flags & PAF_PRINT_INDICES) {
+			tprints("[");
+
+			if (!index_xlat) {
+				print_xlat_ex(idx, NULL, xlat_style);
+			} else if (flags & PAF_INDEX_XLAT_VALUE_INDEXED) {
+				printxval_indexn_ex(index_xlat,
+						    index_xlat_size, idx,
+						    index_dflt, xlat_style);
+			} else {
+				printxvals_ex(idx, index_dflt, xlat_style,
+					      (flags & PAF_INDEX_XLAT_SORTED)
+						&& idx ? NULL : index_xlat,
+					      NULL);
+			}
+
+			tprints("] = ");
+		}
+
+		if (!print_func(tcp, elem_buf, elem_size, opaque_data)) {
+			cur = end_addr;
+			break;
+		}
 	}
-	if (cp < strtab + ld.ld_symb_size)
-		/*
-		 * Write entire symbol table back to avoid
-		 * memory alignment bugs in ptrace
-		 */
-		if (tload(pid, (int)ld.ld_symbols+(int)N_TXTADDR(hdr),
-					(int)ld.ld_symb_size, strtab) < 0)
-			goto err;
+	if (cur != start_addr)
+		tprints("]");
 
-	free(strtab);
-	return 0;
-
-err:
-	free(strtab);
-	return -1;
+	return cur >= end_addr;
 }
 
-#endif /* SUNOS4 */
+int
+printargs(struct tcb *tcp)
+{
+	const int n = n_args(tcp);
+	int i;
+	for (i = 0; i < n; ++i)
+		tprintf("%s%#" PRI_klx, i ? ", " : "", tcp->u_arg[i]);
+	return RVAL_DECODED;
+}
+
+int
+printargs_u(struct tcb *tcp)
+{
+	const int n = n_args(tcp);
+	int i;
+	for (i = 0; i < n; ++i)
+		tprintf("%s%u", i ? ", " : "",
+			(unsigned int) tcp->u_arg[i]);
+	return RVAL_DECODED;
+}
+
+int
+printargs_d(struct tcb *tcp)
+{
+	const int n = n_args(tcp);
+	int i;
+	for (i = 0; i < n; ++i)
+		tprintf("%s%d", i ? ", " : "",
+			(int) tcp->u_arg[i]);
+	return RVAL_DECODED;
+}
+
+/* Print abnormal high bits of a kernel_ulong_t value. */
+void
+print_abnormal_hi(const kernel_ulong_t val)
+{
+	if (current_klongsize > 4) {
+		const unsigned int hi = (unsigned int) ((uint64_t) val >> 32);
+		if (hi)
+			tprintf("%#x<<32|", hi);
+	}
+}
+
+#if defined _LARGEFILE64_SOURCE && defined HAVE_OPEN64
+# define open_file open64
+#else
+# define open_file open
+#endif
+
+int
+read_int_from_file(struct tcb *tcp, const char *const fname, int *const pvalue)
+{
+	const int fd = open_file(fname, O_RDONLY);
+	if (fd < 0)
+		return -1;
+
+	long lval;
+	char buf[sizeof(lval) * 3];
+	int n = read(fd, buf, sizeof(buf) - 1);
+	int saved_errno = errno;
+	close(fd);
+
+	if (n < 0) {
+		errno = saved_errno;
+		return -1;
+	}
+
+	buf[n] = '\0';
+	char *endptr = 0;
+	errno = 0;
+	lval = strtol(buf, &endptr, 10);
+	if (!endptr || (*endptr && '\n' != *endptr)
+#if INT_MAX < LONG_MAX
+	    || lval > INT_MAX || lval < INT_MIN
+#endif
+	    || ERANGE == errno) {
+		if (!errno)
+			errno = EINVAL;
+		return -1;
+	}
+
+	*pvalue = (int) lval;
+	return 0;
+}

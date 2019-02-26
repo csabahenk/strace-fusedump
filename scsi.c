@@ -1,114 +1,163 @@
+/*
+ * Copyright (c) 2007 Vladimir Nadvornik <nadvornik@suse.cz>
+ * Copyright (c) 2007-2018 Dmitry V. Levin <ldv@altlinux.org>
+ * All rights reserved.
+ *
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 #include "defs.h"
 
-#ifdef LINUX
-#include <sys/ioctl.h>
-#include <scsi/sg.h>
+#ifdef HAVE_SCSI_SG_H
+# include <scsi/sg.h>
+#endif
 
-static const struct xlat sg_io_dxfer_direction[] = {
-	{SG_DXFER_NONE,        "SG_DXFER_NONE"},
-	{SG_DXFER_TO_DEV,      "SG_DXFER_TO_DEV"},
-	{SG_DXFER_FROM_DEV,    "SG_DXFER_FROM_DEV"},
-	{SG_DXFER_TO_FROM_DEV, "SG_DXFER_TO_FROM_DEV"},
-	{0, NULL}
-};
+#include "xlat/scsi_sg_commands.h"
+#include "xlat/sg_scsi_reset.h"
 
-static void
-print_sg_io_buffer(struct tcb *tcp, unsigned char *addr, int len)
+static int
+decode_sg_io(struct tcb *const tcp, const uint32_t iid,
+	     const kernel_ulong_t arg)
 {
-	unsigned char *buf = NULL;
-	int     allocated, i;
-
-	if (len == 0)
-		return;
-	allocated = (len > max_strlen) ? max_strlen : len;
-	if (len < 0 ||
-	    (buf = malloc(allocated)) == NULL ||
-	    umoven(tcp, (unsigned long) addr, allocated, (char *) buf) < 0) {
-		tprintf("%p", addr);
-		free(buf);
-		return;
+	switch (iid) {
+		case 'S':
+			return decode_sg_io_v3(tcp, arg);
+		case 'Q':
+			return decode_sg_io_v4(tcp, arg);
+		default:
+			tprintf("[%u]", iid);
+			return RVAL_IOCTL_DECODED;
 	}
-	tprintf("%02x", buf[0]);
-	for (i = 1; i < allocated; ++i)
-		tprintf(", %02x", buf[i]);
-	free(buf);
-	if (allocated != len)
-		tprintf(", ...");
+
 }
 
-static void
-print_sg_io_req(struct tcb *tcp, struct sg_io_hdr *sg_io)
-{
-	tprintf("{'%c', ", sg_io->interface_id);
-	printxval(sg_io_dxfer_direction, sg_io->dxfer_direction,
-		  "SG_DXFER_???");
-	tprintf(", cmd[%u]=[", sg_io->cmd_len);
-	print_sg_io_buffer(tcp, sg_io->cmdp, sg_io->cmd_len);
-	tprintf("], mx_sb_len=%d, ", sg_io->mx_sb_len);
-	tprintf("iovec_count=%d, ", sg_io->iovec_count);
-	tprintf("dxfer_len=%u, ", sg_io->dxfer_len);
-	tprintf("timeout=%u, ", sg_io->timeout);
-	tprintf("flags=%#x", sg_io->flags);
+#ifdef HAVE_SCSI_SG_H
 
-	if (sg_io->dxfer_direction == SG_DXFER_TO_DEV ||
-	    sg_io->dxfer_direction == SG_DXFER_TO_FROM_DEV) {
-		tprintf(", data[%u]=[", sg_io->dxfer_len);
-		printstr(tcp, (unsigned long) sg_io->dxferp,
-			 sg_io->dxfer_len);
-		tprintf("]");
+static int
+decode_sg_scsi_id(struct tcb *const tcp, const kernel_ulong_t arg)
+{
+	struct sg_scsi_id id;
+
+	if (entering(tcp))
+		return 0;
+
+	tprints(", ");
+	if (!umove_or_printaddr(tcp, arg, &id)) {
+		tprintf("{host_no=%d"
+			", channel=%d"
+			", scsi_id=%#x"
+			", lun=%d"
+			", scsi_type=%#x"
+			", h_cmd_per_lun=%hd"
+			", d_queue_depth=%hd}",
+			id.host_no,
+			id.channel,
+			id.scsi_id,
+			id.lun,
+			id.scsi_type,
+			id.h_cmd_per_lun,
+			id.d_queue_depth);
 	}
+	return RVAL_IOCTL_DECODED;
 }
 
-static void
-print_sg_io_res(struct tcb *tcp, struct sg_io_hdr *sg_io)
-{
-	if (sg_io->dxfer_direction == SG_DXFER_FROM_DEV ||
-	    sg_io->dxfer_direction == SG_DXFER_TO_FROM_DEV) {
-		tprintf(", data[%u]=[", sg_io->dxfer_len);
-		printstr(tcp, (unsigned long) sg_io->dxferp,
-			 sg_io->dxfer_len);
-		tprintf("]");
-	}
-	tprintf(", status=%02x, ", sg_io->status);
-	tprintf("masked_status=%02x, ", sg_io->masked_status);
-	tprintf("sb[%u]=[", sg_io->sb_len_wr);
-	print_sg_io_buffer(tcp, sg_io->sbp, sg_io->sb_len_wr);
-	tprintf("], host_status=%#x, ", sg_io->host_status);
-	tprintf("driver_status=%#x, ", sg_io->driver_status);
-	tprintf("resid=%d, ", sg_io->resid);
-	tprintf("duration=%d, ", sg_io->duration);
-	tprintf("info=%#x}", sg_io->info);
-}
+#endif /* HAVE_SCSI_SG_H */
 
 int
-scsi_ioctl(struct tcb *tcp, long code, long arg)
+scsi_ioctl(struct tcb *const tcp, const unsigned int code,
+	   const kernel_ulong_t arg)
 {
 	switch (code) {
 	case SG_IO:
 		if (entering(tcp)) {
-			struct sg_io_hdr sg_io;
+			uint32_t iid;
 
-			if (umove(tcp, arg, &sg_io) < 0)
-				tprintf(", %#lx", arg);
-			else {
-				tprintf(", ");
-				print_sg_io_req(tcp, &sg_io);
+			tprints(", ");
+			if (umove_or_printaddr(tcp, arg, &iid)) {
+				break;
+			} else {
+				return decode_sg_io(tcp, iid, arg);
 			}
+		} else {
+			uint32_t *piid = get_tcb_priv_data(tcp);
+			if (piid)
+				decode_sg_io(tcp, *piid, arg);
+			tprints("}");
+			break;
 		}
-		if (exiting(tcp)) {
-			struct sg_io_hdr sg_io;
 
-			if (!syserror(tcp) && umove(tcp, arg, &sg_io) >= 0)
-				print_sg_io_res(tcp, &sg_io);
-			else
-				tprintf("}");
+#ifdef HAVE_SCSI_SG_H
+	/* returns struct sg_scsi_id */
+	case SG_GET_SCSI_ID:
+		return decode_sg_scsi_id(tcp, arg);
+	/* returns struct sg_req_info */
+	case SG_GET_REQUEST_TABLE:
+		return decode_sg_req_info(tcp, arg);
+#endif /* HAVE_SCSI_SG_H */
+
+	/* takes a value by pointer */
+	case SG_SCSI_RESET: {
+		unsigned int val;
+		tprints(", ");
+		if (!umove_or_printaddr(tcp, arg, &val)) {
+			tprints("[");
+			if (val & SG_SCSI_RESET_NO_ESCALATE) {
+				printxval(sg_scsi_reset,
+					  SG_SCSI_RESET_NO_ESCALATE, 0);
+				tprints("|");
+			}
+			printxval(sg_scsi_reset,
+				  val & ~SG_SCSI_RESET_NO_ESCALATE,
+				  "SG_SCSI_RESET_???");
+			tprints("]");
+
 		}
-		break;
-	default:
-		if (entering(tcp))
-			tprintf(", %#lx", arg);
 		break;
 	}
-	return 1;
+
+	/* takes a signed int by pointer */
+	case SG_NEXT_CMD_LEN:
+	case SG_SET_COMMAND_Q:
+	case SG_SET_DEBUG:
+	case SG_SET_FORCE_LOW_DMA:
+	case SG_SET_FORCE_PACK_ID:
+	case SG_SET_KEEP_ORPHAN:
+	case SG_SET_RESERVED_SIZE:
+	case SG_SET_TIMEOUT:
+		tprints(", ");
+		printnum_int(tcp, arg, "%d");
+		break;
+
+	/* returns a signed int by pointer */
+	case SG_EMULATED_HOST:
+	case SG_GET_ACCESS_COUNT:
+	case SG_GET_COMMAND_Q:
+	case SG_GET_KEEP_ORPHAN:
+	case SG_GET_LOW_DMA:
+	case SG_GET_NUM_WAITING:
+	case SG_GET_PACK_ID:
+	case SG_GET_RESERVED_SIZE:
+	case SG_GET_SG_TABLESIZE:
+	case SG_GET_TRANSFORM:
+	case SG_GET_VERSION_NUM:
+		if (entering(tcp))
+			return 0;
+		tprints(", ");
+		printnum_int(tcp, arg, "%d");
+		break;
+
+	/* takes an integer by value */
+	case SG_SET_TRANSFORM:
+		tprintf(", %#x", (unsigned int) arg);
+		break;
+
+	/* no arguments */
+	case SG_GET_TIMEOUT:
+		break;
+
+	default:
+		return RVAL_DECODED;
+	}
+
+	return RVAL_IOCTL_DECODED;
 }
-#endif /* LINUX */

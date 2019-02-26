@@ -1,8 +1,12 @@
+/* for CLONE_foo: */
+#define _GNU_SOURCE 1
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <sched.h>
+#include <unistd.h>
 
-int child(void* arg)
+int child(void *arg)
 {
 	write(1, "clone\n", 6);
 	return 0;

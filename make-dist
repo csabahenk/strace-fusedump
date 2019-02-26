@@ -1,6 +1,11 @@
 #!/bin/sh -e
+#
+# Copyright (c) 2009-2018 The strace developers.
+# All rights reserved.
+#
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
-tag="${1:-master}"
+id="$(git rev-parse --verify "${1:-@}^{commit}")"
 
 j=-j`getconf _NPROCESSORS_ONLN 2> /dev/null` || j=
 
@@ -12,14 +17,24 @@ set -x
 git clone -q -n -s .git "$distdir"
 
 cd $distdir
-git checkout -f "$tag"
+git checkout -f "$id"
 
 ./git-set-file-times
 
-autoreconf -i -f
+./bootstrap
 
 ./configure --enable-maintainer-mode
 
 make -s $j distcheck
 
-mv -f *.tar.bz2 ..
+if git describe --exact-match --match='v*' >/dev/null; then
+	make -s $j news-check
+else
+	echo 'SKIP: make news-check'
+fi
+
+./make-dsc strace-*.tar.gz > ../strace.dsc
+
+cat strace.spec > ../strace.spec
+
+mv -f strace-*.tar.[gx]z ..

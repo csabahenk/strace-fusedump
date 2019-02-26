@@ -3,208 +3,362 @@
  * Copyright (c) 1993 Branko Lankester <branko@hacktic.nl>
  * Copyright (c) 1993, 1994, 1995, 1996 Rick Sladkey <jrs@world.std.com>
  * Copyright (c) 1996-2001 Wichert Akkerman <wichert@cistron.nl>
+ * Copyright (c) 1999-2018 The strace developers.
  * All rights reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- *	$Id$
+ * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
 #include "defs.h"
-
-const struct ioctlent ioctlent0[] = {
-/*
- * `ioctlent.h' may be generated from `ioctlent.raw' by the auxiliary
- * program `ioctlsort', such that the list is sorted by the `code' field.
- * This has the side-effect of resolving the _IO.. macros into
- * plain integers, eliminating the need to include here everything
- * in "/usr/include" .
- */
-#include "ioctlent.h"
-};
-
-#ifdef LINUX
-#include <asm/ioctl.h>
-#endif
-
-const int nioctlents0 = sizeof ioctlent0 / sizeof ioctlent0[0];
-
-#if SUPPORTED_PERSONALITIES >= 2
-const struct ioctlent ioctlent1[] = {
-#include "ioctlent1.h"
-};
-
-const int nioctlents1 = sizeof ioctlent1 / sizeof ioctlent1[0];
-#endif /* SUPPORTED_PERSONALITIES >= 2 */
-
-#if SUPPORTED_PERSONALITIES >= 3
-const struct ioctlent ioctlent2[] = {
-#include "ioctlent2.h"
-};
-
-const int nioctlents2 = sizeof ioctlent2 / sizeof ioctlent2[0];
-#endif /* SUPPORTED_PERSONALITIES >= 3 */
-
-const struct ioctlent *ioctlent;
-int nioctlents;
+#include <linux/ioctl.h>
+#include "xlat/ioctl_dirs.h"
 
 static int
-compare(a, b)
-const void *a;
-const void *b;
+compare(const void *a, const void *b)
 {
-	unsigned long code1 = ((struct ioctlent *) a)->code;
-	unsigned long code2 = ((struct ioctlent *) b)->code;
+	const unsigned int code1 = (const uintptr_t) a;
+	const unsigned int code2 = ((struct_ioctlent *) b)->code;
 	return (code1 > code2) ? 1 : (code1 < code2) ? -1 : 0;
 }
 
-const struct ioctlent *
-ioctl_lookup(code)
-long code;
+static const struct_ioctlent *
+ioctl_lookup(const unsigned int code)
 {
-	struct ioctlent *iop, ioent;
+	struct_ioctlent *iop;
 
-	ioent.code = code;
-#ifdef LINUX
-	ioent.code &= (_IOC_NRMASK<<_IOC_NRSHIFT) | (_IOC_TYPEMASK<<_IOC_TYPESHIFT);
-#endif
-	iop = (struct ioctlent *) bsearch((char *) &ioent, (char *) ioctlent,
-			nioctlents, sizeof(struct ioctlent), compare);
-	while (iop > ioctlent)
-		if ((--iop)->code != ioent.code) {
+	iop = bsearch((const void *) (const uintptr_t) code, ioctlent,
+			nioctlents, sizeof(ioctlent[0]), compare);
+	while (iop > ioctlent) {
+		iop--;
+		if (iop->code != code) {
 			iop++;
 			break;
 		}
+	}
 	return iop;
 }
 
-const struct ioctlent *
-ioctl_next_match(iop)
-const struct ioctlent *iop;
+static const struct_ioctlent *
+ioctl_next_match(const struct_ioctlent *iop)
 {
-	long code;
-
-	code = (iop++)->code;
+	const unsigned int code = iop->code;
+	iop++;
 	if (iop < ioctlent + nioctlents && iop->code == code)
 		return iop;
 	return NULL;
 }
 
-int
-ioctl_decode(tcp, code, arg)
-struct tcb *tcp;
-long code, arg;
+static void
+ioctl_print_code(const unsigned int code)
 {
-	switch ((code >> 8) & 0xff) {
-#ifdef LINUX
+	tprints("_IOC(");
+	printflags(ioctl_dirs, _IOC_DIR(code), "_IOC_???");
+	tprintf(", %#x, %#x, %#x)",
+		_IOC_TYPE(code), _IOC_NR(code), _IOC_SIZE(code));
+}
+
+static int
+evdev_decode_number(const unsigned int code)
+{
+	const unsigned int nr = _IOC_NR(code);
+
+	if (_IOC_DIR(code) == _IOC_WRITE) {
+		if (nr >= 0xc0 && nr <= 0xc0 + 0x3f) {
+			tprints("EVIOCSABS(");
+			printxval_indexn(evdev_abs, evdev_abs_size, nr - 0xc0,
+					 "ABS_???");
+			tprints(")");
+			return 1;
+		}
+	}
+
+	if (_IOC_DIR(code) != _IOC_READ)
+		return 0;
+
+	if (nr >= 0x20 && nr <= 0x20 + 0x1f) {
+		tprints("EVIOCGBIT(");
+		if (nr == 0x20)
+			tprintf("0");
+		else
+			printxval(evdev_ev, nr - 0x20, "EV_???");
+		tprintf(", %u)", _IOC_SIZE(code));
+		return 1;
+	} else if (nr >= 0x40 && nr <= 0x40 + 0x3f) {
+		tprints("EVIOCGABS(");
+		printxval_indexn(evdev_abs, evdev_abs_size, nr - 0x40,
+				 "ABS_???");
+		tprints(")");
+		return 1;
+	}
+
+	switch (_IOC_NR(nr)) {
+		case 0x06:
+			tprintf("EVIOCGNAME(%u)", _IOC_SIZE(code));
+			return 1;
+		case 0x07:
+			tprintf("EVIOCGPHYS(%u)", _IOC_SIZE(code));
+			return 1;
+		case 0x08:
+			tprintf("EVIOCGUNIQ(%u)", _IOC_SIZE(code));
+			return 1;
+		case 0x09:
+			tprintf("EVIOCGPROP(%u)", _IOC_SIZE(code));
+			return 1;
+		case 0x0a:
+			tprintf("EVIOCGMTSLOTS(%u)", _IOC_SIZE(code));
+			return 1;
+		case 0x18:
+			tprintf("EVIOCGKEY(%u)", _IOC_SIZE(code));
+			return 1;
+		case 0x19:
+			tprintf("EVIOCGLED(%u)", _IOC_SIZE(code));
+			return 1;
+		case 0x1a:
+			tprintf("EVIOCGSND(%u)", _IOC_SIZE(code));
+			return 1;
+		case 0x1b:
+			tprintf("EVIOCGSW(%u)", _IOC_SIZE(code));
+			return 1;
+		default:
+			return 0;
+	}
+}
+
+static int
+hiddev_decode_number(const unsigned int code)
+{
+	if (_IOC_DIR(code) == _IOC_READ) {
+		switch (_IOC_NR(code)) {
+			case 0x04:
+				tprintf("HIDIOCGRAWNAME(%u)", _IOC_SIZE(code));
+				return 1;
+			case 0x05:
+				tprintf("HIDIOCGRAWPHYS(%u)", _IOC_SIZE(code));
+				return 1;
+			case 0x06:
+				tprintf("HIDIOCSFEATURE(%u)", _IOC_SIZE(code));
+				return 1;
+			case 0x12:
+				tprintf("HIDIOCGPHYS(%u)", _IOC_SIZE(code));
+				return 1;
+			default:
+				return 0;
+		}
+	} else if (_IOC_DIR(code) == (_IOC_READ | _IOC_WRITE)) {
+		switch (_IOC_NR(code)) {
+			case 0x06:
+				tprintf("HIDIOCSFEATURE(%u)", _IOC_SIZE(code));
+				return 1;
+			case 0x07:
+				tprintf("HIDIOCGFEATURE(%u)", _IOC_SIZE(code));
+				return 1;
+			default:
+				return 0;
+		}
+	}
+
+	return 0;
+}
+
+static int
+ioctl_decode_command_number(struct tcb *tcp)
+{
+	const unsigned int code = tcp->u_arg[1];
+
+	switch (_IOC_TYPE(code)) {
+		case 'E':
+			return evdev_decode_number(code);
+		case 'H':
+			return hiddev_decode_number(code);
+		case 'M':
+			if (_IOC_DIR(code) == _IOC_WRITE) {
+				tprintf("MIXER_WRITE(%u)", _IOC_NR(code));
+				return 1;
+			} else if (_IOC_DIR(code) == _IOC_READ) {
+				tprintf("MIXER_READ(%u)", _IOC_NR(code));
+				return 1;
+			}
+			return 0;
+		case 'U':
+			if (_IOC_DIR(code) == _IOC_READ && _IOC_NR(code) == 0x2c) {
+				tprintf("UI_GET_SYSNAME(%u)", _IOC_SIZE(code));
+				return 1;
+			}
+			return 0;
+		case 'j':
+			if (_IOC_DIR(code) == _IOC_READ && _IOC_NR(code) == 0x13) {
+				tprintf("JSIOCGNAME(%u)", _IOC_SIZE(code));
+				return 1;
+			}
+			return 0;
+		case 'k':
+			if (_IOC_DIR(code) == _IOC_WRITE && _IOC_NR(code) == 0) {
+				tprintf("SPI_IOC_MESSAGE(%u)", _IOC_SIZE(code));
+				return 1;
+			}
+			return 0;
+		default:
+			return 0;
+	}
+}
+
+/**
+ * Decode arg parameter of the ioctl call.
+ *
+ * @return There are two flags of the return value important for the purposes of
+ *         processing by SYS_FUNC(ioctl):
+ *          - RVAL_IOCTL_DECODED: indicates that ioctl decoder code
+ *                                has printed arg parameter;
+ *          - RVAL_DECODED: indicates that decoding is done.
+ *         As a result, the following behaviour is expected:
+ *          - on entering:
+ *            - 0: decoding should be continued on exiting;
+ *            - RVAL_IOCTL_DECODED: decoding on exiting is not needed
+ *                                  and decoder has printed arg value;
+ *            - RVAL_DECODED: decoding on exiting is not needed
+ *                            and generic handler should print arg value.
+ *          - on exiting:
+ *            - 0: generic handler should print arg value;
+ *            - RVAL_IOCTL_DECODED: decoder has printed arg value.
+ *
+ *         Note that it makes no sense to return just RVAL_DECODED on exiting,
+ *         but, of course, it is not prohibited (for example, it may be useful
+ *         in cases where the return path is common on entering and on exiting
+ *         the syscall).
+ *
+ *         SYS_FUNC(ioctl) converts RVAL_IOCTL_DECODED flag to RVAL_DECODED,
+ *         and passes all other bits of ioctl_decode return value unchanged.
+ */
+static int
+ioctl_decode(struct tcb *tcp)
+{
+	const unsigned int code = tcp->u_arg[1];
+	const kernel_ulong_t arg = tcp->u_arg[2];
+
+	switch (_IOC_TYPE(code)) {
+	case '$':
+		return perf_ioctl(tcp, code, arg);
 #if defined(ALPHA) || defined(POWERPC)
-	case 'f': case 't': case 'T':
+	case 'f': {
+		int ret = file_ioctl(tcp, code, arg);
+		if (ret != RVAL_DECODED)
+			return ret;
+		ATTRIBUTE_FALLTHROUGH;
+	}
+	case 't':
+	case 'T':
+		return term_ioctl(tcp, code, arg);
 #else /* !ALPHA */
+	case 'f':
+		return file_ioctl(tcp, code, arg);
 	case 0x54:
 #endif /* !ALPHA */
-#else /* !LINUX */
-	case 'f': case 't': case 'T':
-#endif /* !LINUX */
 		return term_ioctl(tcp, code, arg);
-#ifdef LINUX
 	case 0x89:
-#else /* !LINUX */
-	case 'r': case 's': case 'i':
-#ifndef FREEBSD
-	case 'p':
-#endif
-#endif /* !LINUX */
 		return sock_ioctl(tcp, code, arg);
-#ifdef USE_PROCFS
-#ifndef HAVE_MP_PROCFS
-#ifndef FREEBSD
-	case 'q':
-#else
-	case 'p':
-#endif
-		return proc_ioctl(tcp, code, arg);
-#endif
-#endif /* USE_PROCFS */
-#ifdef HAVE_SYS_STREAM_H
-	case 'S':
-		return stream_ioctl(tcp, code, arg);
-#endif /* HAVE_SYS_STREAM_H */
-#ifdef LINUX
 	case 'p':
 		return rtc_ioctl(tcp, code, arg);
+	case 0x03:
+		return hdio_ioctl(tcp, code, arg);
+	case 0x12:
+		return block_ioctl(tcp, code, arg);
+	case 'X':
+		return fs_x_ioctl(tcp, code, arg);
 	case 0x22:
 		return scsi_ioctl(tcp, code, arg);
+	case 'L':
+		return loop_ioctl(tcp, code, arg);
+#ifdef HAVE_STRUCT_MTD_WRITE_REQ
+	case 'M':
+		return mtd_ioctl(tcp, code, arg);
 #endif
+#ifdef HAVE_STRUCT_UBI_ATTACH_REQ_MAX_BEB_PER1024
+	case 'o':
+	case 'O':
+		return ubi_ioctl(tcp, code, arg);
+#endif
+	case 'V':
+		return v4l2_ioctl(tcp, code, arg);
+#ifdef HAVE_STRUCT_PTP_SYS_OFFSET
+	case '=':
+		return ptp_ioctl(tcp, code, arg);
+#endif
+#ifdef HAVE_LINUX_INPUT_H
+	case 'E':
+		return evdev_ioctl(tcp, code, arg);
+#endif
+#ifdef HAVE_LINUX_USERFAULTFD_H
+	case 0xaa:
+		return uffdio_ioctl(tcp, code, arg);
+#endif
+#ifdef HAVE_LINUX_BTRFS_H
+	case 0x94:
+		return btrfs_ioctl(tcp, code, arg);
+#endif
+	case 0xb7:
+		return nsfs_ioctl(tcp, code, arg);
+#ifdef HAVE_LINUX_DM_IOCTL_H
+	case 0xfd:
+		return dm_ioctl(tcp, code, arg);
+#endif
+#ifdef HAVE_LINUX_KVM_H
+	case 0xae:
+		return kvm_ioctl(tcp, code, arg);
+#endif
+	case 'I':
+		return inotify_ioctl(tcp, code, arg);
+	case 0xab:
+		return nbd_ioctl(tcp, code, arg);
+	case 'R':
+		return random_ioctl(tcp, code, arg);
 	default:
 		break;
 	}
 	return 0;
 }
 
-/*
- * Registry of ioctl characters, culled from
- *	@(#)ioccom.h 1.7 89/06/16 SMI; from UCB ioctl.h 7.1 6/4/86
- *
- * char	file where defined		notes
- * ----	------------------		-----
- *   F	sun/fbio.h
- *   G	sun/gpio.h
- *   H	vaxif/if_hy.h
- *   M	sundev/mcpcmd.h			*overlap*
- *   M	sys/modem.h			*overlap*
- *   S	sys/stropts.h
- *   T	sys/termio.h			-no overlap-
- *   T	sys/termios.h			-no overlap-
- *   V	sundev/mdreg.h
- *   a	vaxuba/adreg.h
- *   d	sun/dkio.h			-no overlap with sys/des.h-
- *   d	sys/des.h			(possible overlap)
- *   d	vax/dkio.h			(possible overlap)
- *   d	vaxuba/rxreg.h			(possible overlap)
- *   f	sys/filio.h
- *   g	sunwindow/win_ioctl.h		-no overlap-
- *   g	sunwindowdev/winioctl.c		!no manifest constant! -no overlap-
- *   h	sundev/hrc_common.h
- *   i	sys/sockio.h			*overlap*
- *   i	vaxuba/ikreg.h			*overlap*
- *   k	sundev/kbio.h
- *   m	sundev/msio.h			(possible overlap)
- *   m	sundev/msreg.h			(possible overlap)
- *   m	sys/mtio.h			(possible overlap)
- *   n	sun/ndio.h
- *   p	net/nit_buf.h			(possible overlap)
- *   p	net/nit_if.h			(possible overlap)
- *   p	net/nit_pf.h			(possible overlap)
- *   p	sundev/fpareg.h			(possible overlap)
- *   p	sys/sockio.h			(possible overlap)
- *   p	vaxuba/psreg.h			(possible overlap)
- *   q	sun/sqz.h
- *   r	sys/sockio.h
- *   s	sys/sockio.h
- *   t	sys/ttold.h			(possible overlap)
- *   t	sys/ttycom.h			(possible overlap)
- *   v	sundev/vuid_event.h		*overlap*
- *   v	sys/vcmd.h			*overlap*
- *
- * End of Registry
- */
+SYS_FUNC(ioctl)
+{
+	const struct_ioctlent *iop;
+	int ret;
+
+	if (entering(tcp)) {
+		printfd(tcp, tcp->u_arg[0]);
+		tprints(", ");
+
+		if (xlat_verbosity != XLAT_STYLE_ABBREV)
+			tprintf("%#x", (unsigned int) tcp->u_arg[1]);
+		if (xlat_verbosity == XLAT_STYLE_VERBOSE)
+			tprints(" /* ");
+		if (xlat_verbosity != XLAT_STYLE_RAW) {
+			ret = ioctl_decode_command_number(tcp);
+			if (!(ret & IOCTL_NUMBER_STOP_LOOKUP)) {
+				iop = ioctl_lookup(tcp->u_arg[1]);
+				if (iop) {
+					if (ret)
+						tprints(" or ");
+					tprints(iop->symbol);
+					while ((iop = ioctl_next_match(iop)))
+						tprintf(" or %s", iop->symbol);
+				} else if (!ret) {
+					ioctl_print_code(tcp->u_arg[1]);
+				}
+			}
+		}
+		if (xlat_verbosity == XLAT_STYLE_VERBOSE)
+			tprints(" */");
+
+		ret = ioctl_decode(tcp);
+	} else {
+		ret = ioctl_decode(tcp) | RVAL_DECODED;
+	}
+
+	if (ret & RVAL_IOCTL_DECODED) {
+		ret &= ~RVAL_IOCTL_DECODED;
+		ret |= RVAL_DECODED;
+	} else if (ret & RVAL_DECODED) {
+		tprintf(", %#" PRI_klx, tcp->u_arg[2]);
+	}
+
+	return ret;
+}

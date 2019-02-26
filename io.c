@@ -3,52 +3,17 @@
  * Copyright (c) 1993 Branko Lankester <branko@hacktic.nl>
  * Copyright (c) 1993, 1994, 1995, 1996 Rick Sladkey <jrs@world.std.com>
  * Copyright (c) 1996-1999 Wichert Akkerman <wichert@cistron.nl>
+ * Copyright (c) 1999-2018 The strace developers.
  * All rights reserved.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- *	$Id$
+ * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
 #include "defs.h"
-
 #include <fcntl.h>
-#if HAVE_SYS_UIO_H
+#include <sys/stat.h>
 #include <sys/uio.h>
-#endif
-
-#ifdef HAVE_LONG_LONG_OFF_T
-/*
- * Hacks for systems that have a long long off_t
- */
-
-#define sys_pread64	sys_pread
-#define sys_pwrite64	sys_pwrite
-#endif
-
 #include <assert.h>
-
-#define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
 extern int dumpfd;
 static char *dumpbuf = NULL;
@@ -105,383 +70,326 @@ dumpfuseio(struct tcb *tcp, long addr, size_t size, int *fdcond)
 	}
 }
 
-int
-sys_read(tcp)
-struct tcb *tcp;
+SYS_FUNC(read)
 {
 	int fdcond = -1;
 
 	if (entering(tcp)) {
-		tprintf("%ld, ", tcp->u_arg[0]);
+		printfd(tcp, tcp->u_arg[0]);
+		tprints(", ");
 	} else {
 		if (syserror(tcp))
-			tprintf("%#lx", tcp->u_arg[1]);
+			printaddr(tcp->u_arg[1]);
 		else {
-			printstr(tcp, tcp->u_arg[1], tcp->u_rval);
+			printstrn(tcp, tcp->u_arg[1], tcp->u_rval);
 			printmark(tcp, 'R', &fdcond);
 			dumpfuseio(tcp, tcp->u_arg[1], tcp->u_rval, &fdcond);
 		}
-		tprintf(", %lu", tcp->u_arg[2]);
+		tprintf(", %" PRI_klu, tcp->u_arg[2]);
 	}
 	return 0;
 }
 
-int
-sys_write(tcp)
-struct tcb *tcp;
+SYS_FUNC(write)
 {
 	int fdcond = -1;
 
-	if (entering(tcp)) {
-		tprintf("%ld, ", tcp->u_arg[0]);
-		printstr(tcp, tcp->u_arg[1], tcp->u_arg[2]);
-		printmark(tcp, 'W', &fdcond);
-		dumpfuseio(tcp, tcp->u_arg[1], tcp->u_arg[2], &fdcond);
-		tprintf(", %lu", tcp->u_arg[2]);
-	}
-	return 0;
+	printfd(tcp, tcp->u_arg[0]);
+	tprints(", ");
+	printstrn(tcp, tcp->u_arg[1], tcp->u_arg[2]);
+	printmark(tcp, 'W', &fdcond);
+	dumpfuseio(tcp, tcp->u_arg[1], tcp->u_arg[2], &fdcond);
+	tprintf(", %" PRI_klu, tcp->u_arg[2]);
+
+	return RVAL_DECODED;
 }
 
-#if HAVE_SYS_UIO_H
+struct print_iovec_config {
+	enum iov_decode decode_iov;
+	kernel_ulong_t data_size;
+	int *fdcond;
+};
+
+static bool
+print_iovec(struct tcb *tcp, void *elem_buf, size_t elem_size, void *data)
+{
+	const kernel_ulong_t *iov;
+	kernel_ulong_t iov_buf[2], len;
+	struct print_iovec_config *c = data;
+
+	if (elem_size < sizeof(iov_buf)) {
+		iov_buf[0] = ((unsigned int *) elem_buf)[0];
+		iov_buf[1] = ((unsigned int *) elem_buf)[1];
+		iov = iov_buf;
+	} else {
+		iov = elem_buf;
+	}
+
+	tprints("{iov_base=");
+
+	len = iov[1];
+
+	switch (c->decode_iov) {
+		case IOV_DECODE_STR:
+			if (len > c->data_size)
+				len = c->data_size;
+			if (c->data_size != (kernel_ulong_t) -1)
+				c->data_size -= len;
+			printstrn(tcp, iov[0], len);
+			dumpfuseio(tcp, iov[0], len, c->fdcond);
+			break;
+		case IOV_DECODE_NETLINK:
+			if (len > c->data_size)
+				len = c->data_size;
+			if (c->data_size != (kernel_ulong_t) -1)
+				c->data_size -= len;
+			/* assume that the descriptor is 1st syscall argument */
+			decode_netlink(tcp, tcp->u_arg[0], iov[0], len);
+			break;
+		default:
+			printaddr(iov[0]);
+			break;
+	}
+
+	tprintf(", iov_len=%" PRI_klu "}", iov[1]);
+
+	return true;
+}
+
+static void
+tprint_iov_upto_fdcond(struct tcb *const tcp, const kernel_ulong_t len,
+		const kernel_ulong_t addr, const enum iov_decode decode_iov,
+		const kernel_ulong_t data_size, int *fdcond)
+{
+	kernel_ulong_t iov[2];
+	struct print_iovec_config config = {
+		.decode_iov = decode_iov, .data_size = data_size, .fdcond = fdcond
+	};
+
+	print_array(tcp, addr, len, iov, current_wordsize * 2,
+		    tfetch_mem_ignore_syserror, print_iovec, &config);
+}
+
+/*
+ * data_size limits the cumulative size of printed data.
+ * Example: recvmsg returing a short read.
+ */
 void
-tprint_iov(tcp, len, addr, fdcond)
-struct tcb * tcp;
-unsigned long len;
-unsigned long addr;
-int *fdcond;
+tprint_iov_upto(struct tcb *const tcp, const kernel_ulong_t len,
+		const kernel_ulong_t addr, const enum iov_decode decode_iov,
+		const kernel_ulong_t data_size)
 {
-#if defined(LINUX) && SUPPORTED_PERSONALITIES > 1
-	union {
-		struct { u_int32_t base; u_int32_t len; } iov32;
-		struct { u_int64_t base; u_int64_t len; } iov64;
-	} iov;
-#define sizeof_iov \
-  (personality_wordsize[current_personality] == 4 \
-   ? sizeof(iov.iov32) : sizeof(iov.iov64))
-#define iov_iov_base \
-  (personality_wordsize[current_personality] == 4 \
-   ? (u_int64_t) iov.iov32.base : iov.iov64.base)
-#define iov_iov_len \
-  (personality_wordsize[current_personality] == 4 \
-   ? (u_int64_t) iov.iov32.len : iov.iov64.len)
-#else
-	struct iovec iov;
-#define sizeof_iov sizeof(iov)
-#define iov_iov_base iov.iov_base
-#define iov_iov_len iov.iov_len
-#endif
-	unsigned long size, cur, end, abbrev_end;
-	int failed = 0;
-	int32_t fdsiz = -1;
+	int fdcond = 0;
 
-	if (!len) {
-		tprintf("[]");
-		return;
-	}
-	size = len * sizeof_iov;
-	end = addr + size;
-	if (!verbose(tcp) || size / sizeof_iov != len || end < addr) {
-		tprintf("%#lx", addr);
-		return;
-	}
-	if (abbrev(tcp)) {
-		abbrev_end = addr + max_strlen * sizeof_iov;
-		if (abbrev_end < addr)
-			abbrev_end = end;
-	} else {
-		abbrev_end = end;
-	}
-	tprintf("[");
-	for (cur = addr; cur < end; cur += sizeof_iov) {
-		if (cur > addr)
-			tprintf(", ");
-		if (cur >= abbrev_end) {
-			tprintf("...");
-			break;
-		}
-		if (umoven(tcp, cur, sizeof_iov, (char *) &iov) < 0) {
-			tprintf("?");
-			failed = 1;
-			break;
-		}
-		tprintf("{");
-		printstr(tcp, (long) iov_iov_base, iov_iov_len);
-		if (cur == addr && *fdcond && iov_iov_len >= sizeof(fdsiz))
-			assert( umoven(tcp, (long) iov_iov_base, sizeof(fdsiz), (char *) &fdsiz) == 0 );
-		if (fdsiz > 0) {
-			dumpfuseio(tcp, (long) iov_iov_base, MIN(iov_iov_len, fdsiz), fdcond);
-			fdsiz -= iov_iov_len;
-		}
-		tprintf(", %lu}", (unsigned long)iov_iov_len);
-	}
-	tprintf("]");
-	if (failed)
-		tprintf(" %#lx", addr);
-#undef sizeof_iov
-#undef iov_iov_base
-#undef iov_iov_len
+	tprint_iov_upto_fdcond(tcp, len, addr, decode_iov, data_size, &fdcond);
 }
 
-int
-sys_readv(tcp)
-struct tcb *tcp;
+SYS_FUNC(readv)
 {
 	int fdcond = -1;
 
 	if (entering(tcp)) {
-		tprintf("%ld, ", tcp->u_arg[0]);
+		printfd(tcp, tcp->u_arg[0]);
+		tprints(", ");
 	} else {
-		if (syserror(tcp)) {
-			tprintf("%#lx, %lu",
-					tcp->u_arg[1], tcp->u_arg[2]);
-			return 0;
-		}
 		printmark(tcp, 'R', &fdcond);
-		tprint_iov(tcp, tcp->u_arg[2], tcp->u_arg[1], &fdcond);
-		tprintf(", %lu", tcp->u_arg[2]);
+		tprint_iov_upto_fdcond(tcp, tcp->u_arg[2], tcp->u_arg[1],
+				syserror(tcp) ? IOV_DECODE_ADDR :
+				IOV_DECODE_STR, tcp->u_rval, &fdcond);
+		tprintf(", %" PRI_klu, tcp->u_arg[2]);
 	}
 	return 0;
 }
 
-int
-sys_writev(tcp)
-struct tcb *tcp;
+SYS_FUNC(writev)
 {
 	int fdcond = -1;
 
-	if (entering(tcp)) {
-		tprintf("%ld, ", tcp->u_arg[0]);
-		printmark(tcp, 'W', &fdcond);
-		tprint_iov(tcp, tcp->u_arg[2], tcp->u_arg[1], &fdcond);
-		tprintf(", %lu", tcp->u_arg[2]);
-	}
-	return 0;
+	printfd(tcp, tcp->u_arg[0]);
+	tprints(", ");
+	printmark(tcp, 'W', &fdcond);
+	tprint_iov_upto_fdcond(tcp, tcp->u_arg[2], tcp->u_arg[1], IOV_DECODE_STR, -1, &fdcond);
+	tprintf(", %" PRI_klu, tcp->u_arg[2]);
+
+	return RVAL_DECODED;
 }
-#endif
 
-#if defined(SVR4)
-
-int
-sys_pread(tcp)
-struct tcb *tcp;
+SYS_FUNC(pread)
 {
 	if (entering(tcp)) {
-		tprintf("%ld, ", tcp->u_arg[0]);
+		printfd(tcp, tcp->u_arg[0]);
+		tprints(", ");
 	} else {
 		if (syserror(tcp))
-			tprintf("%#lx", tcp->u_arg[1]);
+			printaddr(tcp->u_arg[1]);
 		else
-			printstr(tcp, tcp->u_arg[1], tcp->u_rval);
-#if UNIXWARE
-		/* off_t is signed int */
-		tprintf(", %lu, %ld", tcp->u_arg[2], tcp->u_arg[3]);
-#else
-		tprintf(", %lu, %llu", tcp->u_arg[2],
-			LONG_LONG(tcp->u_arg[3], tcp->u_arg[4]));
-#endif
+			printstrn(tcp, tcp->u_arg[1], tcp->u_rval);
+		tprintf(", %" PRI_klu ", ", tcp->u_arg[2]);
+		printllval(tcp, "%lld", 3);
 	}
 	return 0;
 }
 
-int
-sys_pwrite(tcp)
-struct tcb *tcp;
+SYS_FUNC(pwrite)
 {
-	if (entering(tcp)) {
-		tprintf("%ld, ", tcp->u_arg[0]);
-		printstr(tcp, tcp->u_arg[1], tcp->u_arg[2]);
-#if UNIXWARE
-		/* off_t is signed int */
-		tprintf(", %lu, %ld", tcp->u_arg[2], tcp->u_arg[3]);
-#else
-		tprintf(", %lu, %llu", tcp->u_arg[2],
-			LONG_LONG(tcp->u_arg[3], tcp->u_arg[4]));
-#endif
-	}
-	return 0;
+	printfd(tcp, tcp->u_arg[0]);
+	tprints(", ");
+	printstrn(tcp, tcp->u_arg[1], tcp->u_arg[2]);
+	tprintf(", %" PRI_klu ", ", tcp->u_arg[2]);
+	printllval(tcp, "%lld", 3);
+
+	return RVAL_DECODED;
 }
-#endif /* SVR4 */
 
-#ifdef FREEBSD
-#include <sys/types.h>
-#include <sys/socket.h>
+static void
+print_lld_from_low_high_val(struct tcb *tcp, int arg)
+{
+#if SIZEOF_KERNEL_LONG_T > 4
+# ifndef current_klongsize
+	if (current_klongsize < SIZEOF_KERNEL_LONG_T) {
+		tprintf("%" PRI_kld, (tcp->u_arg[arg + 1] << 32)
+			       | tcp->u_arg[arg]);
+	} else
+# endif /* !current_klongsize */
+	{
+		tprintf("%" PRI_kld, tcp->u_arg[arg]);
+	}
+#else /* SIZEOF_KERNEL_LONG_T == 4 */
+	tprintf("%lld",
+		  ((long long) tcp->u_arg[arg + 1] << 32)
+		| ((long long) tcp->u_arg[arg]));
+#endif
+}
 
-int
-sys_sendfile(tcp)
-struct tcb *tcp;
+#include "xlat/rwf_flags.h"
+
+static int
+do_preadv(struct tcb *tcp, const int flags_arg)
 {
 	if (entering(tcp)) {
-		tprintf("%ld, %ld, %llu, %lu", tcp->u_arg[0], tcp->u_arg[1],
-			LONG_LONG(tcp->u_arg[2], tcp->u_arg[3]),
-			tcp->u_arg[4]);
+		printfd(tcp, tcp->u_arg[0]);
+		tprints(", ");
 	} else {
-		off_t offset;
+		kernel_ulong_t len =
+			truncate_kulong_to_current_wordsize(tcp->u_arg[2]);
 
-		if (!tcp->u_arg[5])
-			tprintf(", NULL");
-		else {
-			struct sf_hdtr hdtr;
-
-			if (umove(tcp, tcp->u_arg[5], &hdtr) < 0)
-				tprintf(", %#lx", tcp->u_arg[5]);
-			else {
-				tprintf(", { ");
-				tprint_iov(tcp, hdtr.hdr_cnt, hdtr.headers);
-				tprintf(", %u, ", hdtr.hdr_cnt);
-				tprint_iov(tcp, hdtr.trl_cnt, hdtr.trailers);
-				tprintf(", %u }", hdtr.hdr_cnt);
-			}
+		tprint_iov_upto(tcp, len, tcp->u_arg[1],
+				syserror(tcp) ? IOV_DECODE_ADDR :
+				IOV_DECODE_STR, tcp->u_rval);
+		tprintf(", %" PRI_klu ", ", len);
+		print_lld_from_low_high_val(tcp, 3);
+		if (flags_arg >= 0) {
+			tprints(", ");
+			printflags(rwf_flags, tcp->u_arg[flags_arg], "RWF_???");
 		}
-		if (!tcp->u_arg[6])
-			tprintf(", NULL");
-		else if (umove(tcp, tcp->u_arg[6], &offset) < 0)
-			tprintf(", %#lx", tcp->u_arg[6]);
-		else
-			tprintf(", [%llu]", offset);
-		tprintf(", %lu", tcp->u_arg[7]);
 	}
 	return 0;
 }
-#endif /* FREEBSD */
 
-#ifdef LINUX
+SYS_FUNC(preadv)
+{
+	return do_preadv(tcp, -1);
+}
 
-/* The SH4 ABI does allow long longs in odd-numbered registers, but
-   does not allow them to be split between registers and memory - and
-   there are only four argument registers for normal functions.  As a
-   result pread takes an extra padding argument before the offset.  This
-   was changed late in the 2.4 series (around 2.4.20).  */
-#if defined(SH)
-#define PREAD_OFFSET_ARG 4
+static int
+do_pwritev(struct tcb *tcp, const int flags_arg)
+{
+	kernel_ulong_t len =
+		truncate_kulong_to_current_wordsize(tcp->u_arg[2]);
+
+	printfd(tcp, tcp->u_arg[0]);
+	tprints(", ");
+	tprint_iov(tcp, len, tcp->u_arg[1], IOV_DECODE_STR);
+	tprintf(", %" PRI_klu ", ", len);
+	print_lld_from_low_high_val(tcp, 3);
+	if (flags_arg >= 0) {
+		tprints(", ");
+		printflags(rwf_flags, tcp->u_arg[flags_arg], "RWF_???");
+	}
+
+	return RVAL_DECODED;
+}
+
+SYS_FUNC(pwritev)
+{
+	return do_pwritev(tcp, -1);
+}
+
+/*
+ * x32 is the only architecture where preadv2 takes 5 arguments
+ * instead of 6, see preadv64v2 in kernel sources.
+ * Likewise, x32 is the only architecture where pwritev2 takes 5 arguments
+ * instead of 6, see pwritev64v2 in kernel sources.
+ */
+
+#if defined X86_64
+# define PREADV2_PWRITEV2_FLAGS_ARG_NO (current_personality == 2 ? 4 : 5)
+#elif defined X32
+# define PREADV2_PWRITEV2_FLAGS_ARG_NO (current_personality == 0 ? 4 : 5)
 #else
-#define PREAD_OFFSET_ARG 3
+# define PREADV2_PWRITEV2_FLAGS_ARG_NO 5
 #endif
 
-int
-sys_pread(tcp)
-struct tcb *tcp;
+SYS_FUNC(preadv2)
 {
-	if (entering(tcp)) {
-		tprintf("%ld, ", tcp->u_arg[0]);
-	} else {
-		if (syserror(tcp))
-			tprintf("%#lx", tcp->u_arg[1]);
-		else
-			printstr(tcp, tcp->u_arg[1], tcp->u_rval);
-		tprintf(", %lu, ", tcp->u_arg[2]);
-		printllval(tcp, "%llu", PREAD_OFFSET_ARG);
-	}
-	return 0;
+	return do_preadv(tcp, PREADV2_PWRITEV2_FLAGS_ARG_NO);
 }
 
-int
-sys_pwrite(tcp)
-struct tcb *tcp;
+SYS_FUNC(pwritev2)
 {
-	if (entering(tcp)) {
-		tprintf("%ld, ", tcp->u_arg[0]);
-		printstr(tcp, tcp->u_arg[1], tcp->u_arg[2]);
-		tprintf(", %lu, ", tcp->u_arg[2]);
-		printllval(tcp, "%llu", PREAD_OFFSET_ARG);
-	}
-	return 0;
+	return do_pwritev(tcp, PREADV2_PWRITEV2_FLAGS_ARG_NO);
 }
 
-int
-sys_sendfile(tcp)
-struct tcb *tcp;
-{
-	if (entering(tcp)) {
-		off_t offset;
+#include "xlat/splice_flags.h"
 
-		tprintf("%ld, %ld, ", tcp->u_arg[0], tcp->u_arg[1]);
-		if (!tcp->u_arg[2])
-			tprintf("NULL");
-		else if (umove(tcp, tcp->u_arg[2], &offset) < 0)
-			tprintf("%#lx", tcp->u_arg[2]);
-		else
-			tprintf("[%lu]", offset);
-		tprintf(", %lu", tcp->u_arg[3]);
-	}
-	return 0;
+SYS_FUNC(tee)
+{
+	/* int fd_in */
+	printfd(tcp, tcp->u_arg[0]);
+	tprints(", ");
+	/* int fd_out */
+	printfd(tcp, tcp->u_arg[1]);
+	tprints(", ");
+	/* size_t len */
+	tprintf("%" PRI_klu ", ", tcp->u_arg[2]);
+	/* unsigned int flags */
+	printflags(splice_flags, tcp->u_arg[3], "SPLICE_F_???");
+
+	return RVAL_DECODED;
 }
 
-int
-sys_sendfile64(tcp)
-struct tcb *tcp;
+SYS_FUNC(splice)
 {
-	if (entering(tcp)) {
-		loff_t offset;
+	/* int fd_in */
+	printfd(tcp, tcp->u_arg[0]);
+	tprints(", ");
+	/* loff_t *off_in */
+	printnum_int64(tcp, tcp->u_arg[1], "%" PRId64);
+	tprints(", ");
+	/* int fd_out */
+	printfd(tcp, tcp->u_arg[2]);
+	tprints(", ");
+	/* loff_t *off_out */
+	printnum_int64(tcp, tcp->u_arg[3], "%" PRId64);
+	tprints(", ");
+	/* size_t len */
+	tprintf("%" PRI_klu ", ", tcp->u_arg[4]);
+	/* unsigned int flags */
+	printflags(splice_flags, tcp->u_arg[5], "SPLICE_F_???");
 
-		tprintf("%ld, %ld, ", tcp->u_arg[0], tcp->u_arg[1]);
-		if (!tcp->u_arg[2])
-			tprintf("NULL");
-		else if (umove(tcp, tcp->u_arg[2], &offset) < 0)
-			tprintf("%#lx", tcp->u_arg[2]);
-		else
-			tprintf("[%llu]", (unsigned long long int) offset);
-		tprintf(", %lu", tcp->u_arg[3]);
-	}
-	return 0;
+	return RVAL_DECODED;
 }
 
-#endif /* LINUX */
-
-#if _LFS64_LARGEFILE || HAVE_LONG_LONG_OFF_T
-int
-sys_pread64(tcp)
-struct tcb *tcp;
+SYS_FUNC(vmsplice)
 {
-	if (entering(tcp)) {
-		tprintf("%ld, ", tcp->u_arg[0]);
-	} else {
-		if (syserror(tcp))
-			tprintf("%#lx", tcp->u_arg[1]);
-		else
-			printstr(tcp, tcp->u_arg[1], tcp->u_rval);
-		tprintf(", %lu, ", tcp->u_arg[2]);
-		printllval(tcp, "%#llx", 3);
-	}
-	return 0;
-}
+	/* int fd */
+	printfd(tcp, tcp->u_arg[0]);
+	tprints(", ");
+	/* const struct iovec *iov, unsigned long nr_segs */
+	tprint_iov(tcp, tcp->u_arg[2], tcp->u_arg[1], IOV_DECODE_STR);
+	tprintf(", %" PRI_klu ", ", tcp->u_arg[2]);
+	/* unsigned int flags */
+	printflags(splice_flags, tcp->u_arg[3], "SPLICE_F_???");
 
-int
-sys_pwrite64(tcp)
-struct tcb *tcp;
-{
-	if (entering(tcp)) {
-		tprintf("%ld, ", tcp->u_arg[0]);
-		printstr(tcp, tcp->u_arg[1], tcp->u_arg[2]);
-		tprintf(", %lu, ", tcp->u_arg[2]);
-		printllval(tcp, "%#llx", 3);
-	}
-	return 0;
-}
-#endif
-
-int
-sys_ioctl(tcp)
-struct tcb *tcp;
-{
-	const struct ioctlent *iop;
-
-	if (entering(tcp)) {
-		tprintf("%ld, ", tcp->u_arg[0]);
-		iop = ioctl_lookup(tcp->u_arg[1]);
-		if (iop) {
-			tprintf("%s", iop->symbol);
-			while ((iop = ioctl_next_match(iop)))
-				tprintf(" or %s", iop->symbol);
-		} else
-			tprintf("%#lx", tcp->u_arg[1]);
-		ioctl_decode(tcp, tcp->u_arg[1], tcp->u_arg[2]);
-	}
-	else {
-		int ret;
-		if (!(ret = ioctl_decode(tcp, tcp->u_arg[1], tcp->u_arg[2])))
-			tprintf(", %#lx", tcp->u_arg[2]);
-		else
-			return ret - 1;
-	}
-	return 0;
+	return RVAL_DECODED;
 }

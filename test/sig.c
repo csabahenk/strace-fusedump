@@ -1,12 +1,15 @@
 #include <stdlib.h>
 #include <signal.h>
+#include <unistd.h>
 
-void interrupt()
+static void
+interrupt(void)
 {
 	write(2, "xyzzy\n", 6);
 }
 
-int main(int argc, char *argv[])
+int
+main(int argc, char *argv[])
 {
 	char buf[1024];
 
