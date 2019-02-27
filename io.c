@@ -52,13 +52,52 @@ fuse_check(struct tcb *tcp, int *is_fuse)
 	return *is_fuse;
 }
 
+struct fusedump_timespec {
+	uint32_t len;
+	uint64_t sec;
+	uint32_t nsec;
+} __attribute__((packed));
+
+struct fusedump_signature {
+	uint32_t len;
+	char sig[5];
+} __attribute__((packed));
+
+static void
+fusedump_gettime (struct fusedump_timespec *fts)
+{
+	struct timespec ts = {0,};
+
+	clock_gettime (CLOCK_REALTIME, &ts);
+
+	fts->sec  = ts.tv_sec;
+	fts->nsec = ts.tv_nsec;
+}
+
 static void
 fuse_printmark(struct tcb *tcp, char mark, int *is_fuse)
 {
+	char signature[] = {'S', 'T', 'R', 'A', 0xCE};
+	struct iovec iovs[4];
+	uint32_t fusedump_item_count = 3;
+	struct fusedump_timespec fts;
+	struct fusedump_signature fsig;
+
 	if (!fuse_check(tcp, is_fuse))
 		return;
 
-	if (write(fuse_dumpfd, &mark, 1) != 1)
+	fts.len = sizeof (fts);
+	fusedump_gettime (&fts);
+	fsig.len = sizeof (fsig);
+	memcpy (fsig.sig, signature, sizeof(signature));
+
+	iovs[0] = (struct iovec){ &mark, sizeof (mark) };
+	iovs[1] = (struct iovec){ &fusedump_item_count,
+				  sizeof (fusedump_item_count) };
+	iovs[2] = (struct iovec){ &fts, fts.len };
+	iovs[3] = (struct iovec){ &fsig, fsig.len };
+
+	if (writev(fuse_dumpfd, iovs, 4) == -1)
 		error_msg_and_die("cannot write to fuse dumpfile: %s",
 				  strerror(errno));
 }
