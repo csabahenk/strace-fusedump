@@ -13,66 +13,75 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
-#include <assert.h>
 
-extern int dumpfd;
-static char *dumpbuf = NULL;
-static size_t dumpbufsize = 8192;
+extern int fuse_dumpfd;
+static char *fuse_dumpbuf = NULL;
+static size_t fuse_dumpbufsize = 8192;
 
 static void
-initdumpbuf(size_t size)
+fuse_initdumpbuf(size_t size)
 {
-	if (!dumpbuf)
-		assert( dumpbuf = malloc(dumpbufsize) );
-	if (size > dumpbufsize) {
-		assert( dumpbuf = realloc(dumpbuf, size) );
-		dumpbufsize = size;
+	if (!fuse_dumpbuf)
+		fuse_dumpbuf = xmalloc(fuse_dumpbufsize);
+	if (size > fuse_dumpbufsize) {
+		fuse_dumpbuf = xreallocarray(fuse_dumpbuf, 1, size);
+		fuse_dumpbufsize = size;
 	}
 }
 
 static int
-check_fuse(struct tcb *tcp, int *fdcond)
+fuse_check(struct tcb *tcp, int *is_fuse)
 {
 	struct stat st;
 	char ppath[128];
 	int rv;
 
-	if (*fdcond >= 0)
-		return *fdcond;
-	if (dumpfd == -1) {
-		*fdcond = 0;
+	if (*is_fuse >= 0)
+		return *is_fuse;
+	if (fuse_dumpfd == -1) {
+		*is_fuse = 0;
 
 		return 0;
 	}
 
-	snprintf(ppath, sizeof(ppath), "/proc/%d/fd/%ld", tcp->pid, tcp->u_arg[0]);
+	snprintf(ppath, sizeof(ppath), "/proc/%d/fd/%ld", tcp->pid,
+		 tcp->u_arg[0]);
 	rv = stat(ppath, &st);
-	*fdcond = (rv == 0 && st.st_rdev == 0xae5 /* makedev(10, 229) */ );
+	*is_fuse = (rv == 0 && st.st_rdev == 0xae5 /* makedev(10, 229) */ );
 
-	return *fdcond;
+	return *is_fuse;
 }
 
 static void
-printmark(struct tcb *tcp, char mark, int *fdcond)
+fuse_printmark(struct tcb *tcp, char mark, int *is_fuse)
 {
-	if (check_fuse(tcp, fdcond))
-		assert( write(dumpfd, &mark, 1) == 1 );
+	if (!fuse_check(tcp, is_fuse))
+		return;
+
+	if (write(fuse_dumpfd, &mark, 1) != 1)
+		error_msg_and_die("cannot write to fuse dumpfile: %s",
+				  strerror(errno));
 }
 
 static void
-dumpfuseio(struct tcb *tcp, long addr, size_t size, int *fdcond)
+fuse_dumpio(struct tcb *tcp, long addr, size_t size, int *is_fuse)
 {
-	if (check_fuse(tcp, fdcond)) {
-		initdumpbuf(size);
+	if (!fuse_check(tcp, is_fuse))
+		return;
 
-		assert( umoven(tcp, addr, size, dumpbuf) == 0 );
-		assert( write(dumpfd, dumpbuf, size) == size );
-	}
+	fuse_initdumpbuf(size);
+
+	if (umoven(tcp, addr, size, fuse_dumpbuf))
+		error_msg_and_die("cannot read data from %#" PRIx64,
+				  addr);
+	if (write(fuse_dumpfd, fuse_dumpbuf, size) != (ssize_t)size)
+		error_msg_and_die("cannot write to fuse dumpfile: %s",
+				  strerror(errno));
 }
 
 SYS_FUNC(read)
 {
-	int fdcond = -1;
+	int is_fuse = -1;
 
 	if (entering(tcp)) {
 		printfd(tcp, tcp->u_arg[0]);
@@ -82,8 +91,8 @@ SYS_FUNC(read)
 			printaddr(tcp->u_arg[1]);
 		else {
 			printstrn(tcp, tcp->u_arg[1], tcp->u_rval);
-			printmark(tcp, 'R', &fdcond);
-			dumpfuseio(tcp, tcp->u_arg[1], tcp->u_rval, &fdcond);
+			fuse_printmark(tcp, 'R', &is_fuse);
+			fuse_dumpio(tcp, tcp->u_arg[1], tcp->u_rval, &is_fuse);
 		}
 		tprintf(", %" PRI_klu, tcp->u_arg[2]);
 	}
@@ -92,13 +101,13 @@ SYS_FUNC(read)
 
 SYS_FUNC(write)
 {
-	int fdcond = -1;
+	int is_fuse = -1;
 
 	printfd(tcp, tcp->u_arg[0]);
 	tprints(", ");
 	printstrn(tcp, tcp->u_arg[1], tcp->u_arg[2]);
-	printmark(tcp, 'W', &fdcond);
-	dumpfuseio(tcp, tcp->u_arg[1], tcp->u_arg[2], &fdcond);
+	fuse_printmark(tcp, 'W', &is_fuse);
+	fuse_dumpio(tcp, tcp->u_arg[1], tcp->u_arg[2], &is_fuse);
 	tprintf(", %" PRI_klu, tcp->u_arg[2]);
 
 	return RVAL_DECODED;
@@ -107,7 +116,7 @@ SYS_FUNC(write)
 struct print_iovec_config {
 	enum iov_decode decode_iov;
 	kernel_ulong_t data_size;
-	int *fdcond;
+	int *is_fuse;
 };
 
 static bool
@@ -136,7 +145,7 @@ print_iovec(struct tcb *tcp, void *elem_buf, size_t elem_size, void *data)
 			if (c->data_size != (kernel_ulong_t) -1)
 				c->data_size -= len;
 			printstrn(tcp, iov[0], len);
-			dumpfuseio(tcp, iov[0], len, c->fdcond);
+			fuse_dumpio(tcp, iov[0], len, c->is_fuse);
 			break;
 		case IOV_DECODE_NETLINK:
 			if (len > c->data_size)
@@ -157,13 +166,14 @@ print_iovec(struct tcb *tcp, void *elem_buf, size_t elem_size, void *data)
 }
 
 static void
-tprint_iov_upto_fdcond(struct tcb *const tcp, const kernel_ulong_t len,
-		const kernel_ulong_t addr, const enum iov_decode decode_iov,
-		const kernel_ulong_t data_size, int *fdcond)
+tprint_iov_upto_fuse(struct tcb *const tcp, const kernel_ulong_t len,
+		     const kernel_ulong_t addr,
+		     const enum iov_decode decode_iov,
+		     const kernel_ulong_t data_size, int *is_fuse)
 {
 	kernel_ulong_t iov[2];
 	struct print_iovec_config config = {
-		.decode_iov = decode_iov, .data_size = data_size, .fdcond = fdcond
+		.decode_iov = decode_iov, .data_size = data_size, .is_fuse = is_fuse
 	};
 
 	print_array(tcp, addr, len, iov, current_wordsize * 2,
@@ -179,23 +189,24 @@ tprint_iov_upto(struct tcb *const tcp, const kernel_ulong_t len,
 		const kernel_ulong_t addr, const enum iov_decode decode_iov,
 		const kernel_ulong_t data_size)
 {
-	int fdcond = 0;
+	int is_fuse = 0;
 
-	tprint_iov_upto_fdcond(tcp, len, addr, decode_iov, data_size, &fdcond);
+	tprint_iov_upto_fuse(tcp, len, addr, decode_iov, data_size,
+			     &is_fuse);
 }
 
 SYS_FUNC(readv)
 {
-	int fdcond = -1;
+	int is_fuse = -1;
 
 	if (entering(tcp)) {
 		printfd(tcp, tcp->u_arg[0]);
 		tprints(", ");
 	} else {
-		printmark(tcp, 'R', &fdcond);
-		tprint_iov_upto_fdcond(tcp, tcp->u_arg[2], tcp->u_arg[1],
-				syserror(tcp) ? IOV_DECODE_ADDR :
-				IOV_DECODE_STR, tcp->u_rval, &fdcond);
+		fuse_printmark(tcp, 'R', &is_fuse);
+		tprint_iov_upto_fuse(tcp, tcp->u_arg[2], tcp->u_arg[1],
+				     syserror(tcp) ? IOV_DECODE_ADDR :
+				     IOV_DECODE_STR, tcp->u_rval, &is_fuse);
 		tprintf(", %" PRI_klu, tcp->u_arg[2]);
 	}
 	return 0;
@@ -203,12 +214,13 @@ SYS_FUNC(readv)
 
 SYS_FUNC(writev)
 {
-	int fdcond = -1;
+	int is_fuse = -1;
 
 	printfd(tcp, tcp->u_arg[0]);
 	tprints(", ");
-	printmark(tcp, 'W', &fdcond);
-	tprint_iov_upto_fdcond(tcp, tcp->u_arg[2], tcp->u_arg[1], IOV_DECODE_STR, -1, &fdcond);
+	fuse_printmark(tcp, 'W', &is_fuse);
+	tprint_iov_upto_fuse(tcp, tcp->u_arg[2], tcp->u_arg[1],
+			     IOV_DECODE_STR, -1, &is_fuse);
 	tprintf(", %" PRI_klu, tcp->u_arg[2]);
 
 	return RVAL_DECODED;

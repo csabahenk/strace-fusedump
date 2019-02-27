@@ -8,7 +8,6 @@
 
 #include "defs.h"
 #include <fcntl.h>
-#include <assert.h>
 #include "nsig.h"
 #include "number_set.h"
 #include "filter.h"
@@ -409,14 +408,17 @@ qualify_kvm(const char *const str)
 	}
 }
 
-int dumpfd = -1;
+int fuse_dumpfd = -1;
 
 static void
 qualify_fuse(const char *const str)
 {
 	unlink (str);
-	dumpfd = open(str, O_WRONLY | O_CREAT | O_EXCL, 0600);
-	assert( dumpfd != -1 );
+	fuse_dumpfd = open(str, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	if (fuse_dumpfd == -1) {
+		error_msg_and_die("could not open fuse dump file '%s': %s",
+				  strerror(errno));
+	}
 }
 
 static const struct qual_options {
