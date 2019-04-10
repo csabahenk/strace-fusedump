@@ -11,128 +11,18 @@
 
 #include "defs.h"
 #include <fcntl.h>
-#include <sys/stat.h>
 #include <sys/uio.h>
-
-extern int fuse_dumpfd;
-static char *fuse_dumpbuf = NULL;
-static size_t fuse_dumpbufsize = 8192;
-
-static void
-fuse_initdumpbuf(size_t size)
-{
-	if (!fuse_dumpbuf)
-		fuse_dumpbuf = xmalloc(fuse_dumpbufsize);
-	if (size > fuse_dumpbufsize) {
-		fuse_dumpbuf = xreallocarray(fuse_dumpbuf, 1, size);
-		fuse_dumpbufsize = size;
-	}
-}
-
-static int
-fuse_check(struct tcb *tcp, int *is_fuse)
-{
-	struct stat st;
-	char ppath[128];
-	int rv;
-
-	if (*is_fuse >= 0)
-		return *is_fuse;
-	if (fuse_dumpfd == -1) {
-		*is_fuse = 0;
-
-		return 0;
-	}
-
-	snprintf(ppath, sizeof(ppath), "/proc/%d/fd/%ld", tcp->pid,
-		 tcp->u_arg[0]);
-	rv = stat(ppath, &st);
-	*is_fuse = (rv == 0 && st.st_rdev == 0xae5 /* makedev(10, 229) */ );
-
-	return *is_fuse;
-}
-
-struct fusedump_timespec {
-	uint32_t len;
-	uint64_t sec;
-	uint32_t nsec;
-} __attribute__((packed));
-
-struct fusedump_signature {
-	uint32_t len;
-	char sig[5];
-} __attribute__((packed));
-
-static void
-fusedump_gettime (struct fusedump_timespec *fts)
-{
-	struct timespec ts = {0,};
-
-	clock_gettime (CLOCK_REALTIME, &ts);
-
-	fts->sec  = ts.tv_sec;
-	fts->nsec = ts.tv_nsec;
-}
-
-static void
-fuse_printmark(struct tcb *tcp, char mark, int *is_fuse)
-{
-	char signature[] = {'S', 'T', 'R', 'A', 0xCE};
-	struct iovec iovs[4];
-	uint32_t fusedump_item_count = 3;
-	struct fusedump_timespec fts;
-	struct fusedump_signature fsig;
-
-	if (!fuse_check(tcp, is_fuse))
-		return;
-
-	fts.len = sizeof (fts);
-	fusedump_gettime (&fts);
-	fsig.len = sizeof (fsig);
-	memcpy (fsig.sig, signature, sizeof(signature));
-
-	iovs[0] = (struct iovec){ &mark, sizeof (mark) };
-	iovs[1] = (struct iovec){ &fusedump_item_count,
-				  sizeof (fusedump_item_count) };
-	iovs[2] = (struct iovec){ &fts, fts.len };
-	iovs[3] = (struct iovec){ &fsig, fsig.len };
-
-	if (writev(fuse_dumpfd, iovs, 4) == -1)
-		error_msg_and_die("cannot write to fuse dumpfile: %s",
-				  strerror(errno));
-}
-
-static void
-fuse_dumpio(struct tcb *tcp, long addr, size_t size, int *is_fuse)
-{
-	if (!fuse_check(tcp, is_fuse))
-		return;
-
-	fuse_initdumpbuf(size);
-
-	if (umoven(tcp, addr, size, fuse_dumpbuf))
-		error_msg_and_die("cannot read data from %#" PRIx64,
-				  addr);
-	if (write(fuse_dumpfd, fuse_dumpbuf, size) != (ssize_t)size)
-		error_msg_and_die("cannot write to fuse dumpfile: %s",
-				  strerror(errno));
-}
 
 SYS_FUNC(read)
 {
-	int is_fuse = -1;
-
 	if (entering(tcp)) {
 		printfd(tcp, tcp->u_arg[0]);
 		tprints(", ");
 	} else {
 		if (syserror(tcp))
 			printaddr(tcp->u_arg[1]);
-		else {
+		else
 			printstrn(tcp, tcp->u_arg[1], tcp->u_rval);
-			fuse_printmark(tcp, 'R', &is_fuse);
-			fuse_dumpio(tcp, tcp->u_arg[1], tcp->u_rval, &is_fuse);
-		}
 		tprintf(", %" PRI_klu, tcp->u_arg[2]);
 	}
 	return 0;
@@ -140,13 +30,9 @@ SYS_FUNC(read)
 
 SYS_FUNC(write)
 {
-	int is_fuse = -1;
-
 	printfd(tcp, tcp->u_arg[0]);
 	tprints(", ");
 	printstrn(tcp, tcp->u_arg[1], tcp->u_arg[2]);
-	fuse_printmark(tcp, 'W', &is_fuse);
-	fuse_dumpio(tcp, tcp->u_arg[1], tcp->u_arg[2], &is_fuse);
 	tprintf(", %" PRI_klu, tcp->u_arg[2]);
 
 	return RVAL_DECODED;
@@ -155,7 +41,6 @@ SYS_FUNC(write)
 struct print_iovec_config {
 	enum iov_decode decode_iov;
 	kernel_ulong_t data_size;
-	int *is_fuse;
 };
 
 static bool
@@ -184,7 +69,6 @@ print_iovec(struct tcb *tcp, void *elem_buf, size_t elem_size, void *data)
 			if (c->data_size != (kernel_ulong_t) -1)
 				c->data_size -= len;
 			printstrn(tcp, iov[0], len);
-			fuse_dumpio(tcp, iov[0], len, c->is_fuse);
 			break;
 		case IOV_DECODE_NETLINK:
 			if (len > c->data_size)
@@ -204,21 +88,6 @@ print_iovec(struct tcb *tcp, void *elem_buf, size_t elem_size, void *data)
 	return true;
 }
 
-static void
-tprint_iov_upto_fuse(struct tcb *const tcp, const kernel_ulong_t len,
-		     const kernel_ulong_t addr,
-		     const enum iov_decode decode_iov,
-		     const kernel_ulong_t data_size, int *is_fuse)
-{
-	kernel_ulong_t iov[2];
-	struct print_iovec_config config = {
-		.decode_iov = decode_iov, .data_size = data_size, .is_fuse = is_fuse
-	};
-
-	print_array(tcp, addr, len, iov, current_wordsize * 2,
-		    tfetch_mem_ignore_syserror, print_iovec, &config);
-}
-
 /*
  * data_size limits the cumulative size of printed data.
  * Example: recvmsg returing a short read.
@@ -228,24 +97,24 @@ tprint_iov_upto(struct tcb *const tcp, const kernel_ulong_t len,
 		const kernel_ulong_t addr, const enum iov_decode decode_iov,
 		const kernel_ulong_t data_size)
 {
-	int is_fuse = 0;
+	kernel_ulong_t iov[2];
+	struct print_iovec_config config = {
+		.decode_iov = decode_iov, .data_size = data_size
+	};
 
-	tprint_iov_upto_fuse(tcp, len, addr, decode_iov, data_size,
-			     &is_fuse);
+	print_array(tcp, addr, len, iov, current_wordsize * 2,
+		    tfetch_mem_ignore_syserror, print_iovec, &config);
 }
 
 SYS_FUNC(readv)
 {
-	int is_fuse = -1;
-
 	if (entering(tcp)) {
 		printfd(tcp, tcp->u_arg[0]);
 		tprints(", ");
 	} else {
-		fuse_printmark(tcp, 'R', &is_fuse);
-		tprint_iov_upto_fuse(tcp, tcp->u_arg[2], tcp->u_arg[1],
-				     syserror(tcp) ? IOV_DECODE_ADDR :
-				     IOV_DECODE_STR, tcp->u_rval, &is_fuse);
+		tprint_iov_upto(tcp, tcp->u_arg[2], tcp->u_arg[1],
+				syserror(tcp) ? IOV_DECODE_ADDR :
+				IOV_DECODE_STR, tcp->u_rval);
 		tprintf(", %" PRI_klu, tcp->u_arg[2]);
 	}
 	return 0;
@@ -253,13 +122,9 @@ SYS_FUNC(readv)
 
 SYS_FUNC(writev)
 {
-	int is_fuse = -1;
-
 	printfd(tcp, tcp->u_arg[0]);
 	tprints(", ");
-	fuse_printmark(tcp, 'W', &is_fuse);
-	tprint_iov_upto_fuse(tcp, tcp->u_arg[2], tcp->u_arg[1],
-			     IOV_DECODE_STR, -1, &is_fuse);
+	tprint_iov(tcp, tcp->u_arg[2], tcp->u_arg[1], IOV_DECODE_STR);
 	tprintf(", %" PRI_klu, tcp->u_arg[2]);
 
 	return RVAL_DECODED;

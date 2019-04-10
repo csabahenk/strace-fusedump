@@ -412,6 +412,34 @@ dumpio(struct tcb *tcp)
 	}
 }
 
+static void
+dumpio_fuse(struct tcb *tcp)
+{
+	if (syserror(tcp) || !fuse_check(tcp))
+		return;
+
+	switch (tcp_sysent(tcp)->sen) {
+	case SEN_read:
+		fuse_printmark(tcp, 'R');
+		fuse_dumpio(tcp, tcp->u_arg[1], tcp->u_rval);
+		break;
+	case SEN_write:
+		fuse_printmark(tcp, 'W');
+		fuse_dumpio(tcp, tcp->u_arg[1], tcp->u_arg[2]);
+		break;
+	case SEN_readv:
+		fuse_printmark(tcp, 'R');
+		dumpiov_upto_cbk(tcp, tcp->u_arg[2], tcp->u_arg[1],
+			         tcp->u_rval, false,  fuse_dumpio);
+		break;
+	case SEN_writev:
+		fuse_printmark(tcp, 'W');
+		dumpiov_upto_cbk(tcp, tcp->u_arg[2], tcp->u_arg[1],
+			         -1, false, fuse_dumpio);
+		break;
+	}
+}
+
 const char *
 err_name(unsigned long err)
 {
@@ -898,6 +926,7 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
 	}
 	tprints("\n");
 	dumpio(tcp);
+	dumpio_fuse(tcp);
 	line_ended();
 
 #ifdef ENABLE_STACKTRACE

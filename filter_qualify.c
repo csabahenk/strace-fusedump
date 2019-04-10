@@ -408,8 +408,6 @@ qualify_kvm(const char *const str)
 	}
 }
 
-int fuse_dumpfd = -1;
-
 static void
 qualify_fuse(const char *const str)
 {
@@ -417,7 +415,7 @@ qualify_fuse(const char *const str)
 	fuse_dumpfd = open(str, O_WRONLY | O_CREAT | O_EXCL, 0600);
 	if (fuse_dumpfd == -1) {
 		error_msg_and_die("could not open fuse dump file '%s': %s",
-				  strerror(errno));
+				  str, strerror(errno));
 	}
 }
 

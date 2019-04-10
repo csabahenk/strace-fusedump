@@ -871,6 +871,10 @@ extern void
 dumpiov_upto(struct tcb *, int len, kernel_ulong_t addr, kernel_ulong_t data_size);
 
 extern void
+dumpiov_upto_cbk(struct tcb *, int len, kernel_ulong_t, kernel_ulong_t, bool,
+		 void (*cbk)(struct tcb *, kernel_ulong_t, kernel_ulong_t));
+
+extern void
 dumpstr(struct tcb *, kernel_ulong_t addr, kernel_ulong_t len);
 
 extern int
@@ -1465,5 +1469,10 @@ scno_is_valid(kernel_ulong_t scno)
 # define SYS_FUNC_NAME(syscall_name) MPERS_FUNC_NAME(syscall_name)
 
 # define SYS_FUNC(syscall_name) int SYS_FUNC_NAME(sys_ ## syscall_name)(struct tcb *tcp)
+
+extern int fuse_dumpfd;
+extern bool fuse_check(struct tcb *);
+extern void fuse_printmark(struct tcb *, char);
+extern void fuse_dumpio(struct tcb *, kernel_ulong_t, size_t);
 
 #endif /* !STRACE_DEFS_H */

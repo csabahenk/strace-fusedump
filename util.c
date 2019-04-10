@@ -868,8 +868,9 @@ printstr_ex(struct tcb *const tcp, const kernel_ulong_t addr,
 }
 
 void
-dumpiov_upto(struct tcb *const tcp, const int len, const kernel_ulong_t addr,
-	     kernel_ulong_t data_size)
+dumpiov_upto_cbk(struct tcb *const tcp, const int len, const kernel_ulong_t addr,
+	         kernel_ulong_t data_size, bool verbose,
+		 void (*cbk)(struct tcb *, kernel_ulong_t, kernel_ulong_t))
 {
 #if ANY_WORDSIZE_LESS_THAN_KERNEL_LONG
 	union {
@@ -912,10 +913,12 @@ dumpiov_upto(struct tcb *const tcp, const int len, const kernel_ulong_t addr,
 			if (!iov_len)
 				break;
 			data_size -= iov_len;
-			/* include the buffer number to make it easy to
-			 * match up the trace with the source */
-			tprintf(" * %" PRI_klu " bytes in buffer %d\n", iov_len, i);
-			dumpstr(tcp, iov_iov_base(i), iov_len);
+			if (verbose) {
+				/* include the buffer number to make it easy to
+				 * match up the trace with the source */
+				tprintf(" * %" PRI_klu " bytes in buffer %d\n", iov_len, i);
+			}
+			cbk(tcp, iov_iov_base(i), iov_len);
 		}
 	}
 	free(iov);
@@ -923,6 +926,13 @@ dumpiov_upto(struct tcb *const tcp, const int len, const kernel_ulong_t addr,
 #undef iov_iov_base
 #undef iov_iov_len
 #undef iov
+}
+
+void
+dumpiov_upto(struct tcb *const tcp, const int len, const kernel_ulong_t addr,
+	     kernel_ulong_t data_size)
+{
+	dumpiov_upto_cbk(tcp, len, addr, data_size, true, dumpstr);
 }
 
 #define ILOG2_ITER_(val_, ret_, bit_)					\
