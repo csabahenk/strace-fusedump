@@ -6,6 +6,13 @@ int fuse_dumpfd = -1;
 static char *fuse_dumpbuf = NULL;
 static size_t fuse_dumpbufsize = 8192;
 
+enum fuse_fd_status {
+	FD_FUSE_UNSET,
+	FD_FUSE_YES,
+	FD_FUSE_NO
+};
+
+
 static void
 fuse_initdumpbuf(size_t size)
 {
@@ -18,19 +25,31 @@ fuse_initdumpbuf(size_t size)
 }
 
 bool
-fuse_check(struct tcb *tcp)
+fuse_check(struct tcb *tcp, int fd, enum existence_spec extant)
 {
 	struct stat st;
 	char ppath[128];
 	int rv;
+	struct fdcontext_entry *fdxe;
+	struct fuse_fdcontext_entry *ffdxe;
 
-	if (fuse_dumpfd == -1)
-		return 0;
+	fdcontext_get_entry(tcp, fd, &fdxe);
+	ffdxe = &fdxe->fuse_fdcontext_entry;
 
-	snprintf(ppath, sizeof(ppath), "/proc/%d/fd/%ld", tcp->pid,
-		 tcp->u_arg[0]);
-	rv = stat(ppath, &st);
-	return (rv == 0 && st.st_rdev == 0xae5 /* makedev(10, 229) */ );
+	if (extant == (ffdxe->fd_status == FD_FUSE_UNSET ? IT_IS : IT_ISNT))
+		error_msg_and_die("%s: in syscall %s fdcontext_entry "
+			"of fd %d: fuse fd existence spec: %d, status: %d",
+			__func__,  tcp_sysent(tcp)->sys_name, fd, extant,
+			ffdxe->fd_status);
+	if (ffdxe->fd_status == FD_FUSE_UNSET) {
+		snprintf(ppath, sizeof(ppath), "/proc/%d/fd/%d", tcp->pid, fd);
+		rv = stat(ppath, &st);
+
+		ffdxe->fd_status = (rv == 0 &&
+				    st.st_rdev == 0xae5 /* makedev(10, 229) */ ) ?
+				   FD_FUSE_YES : FD_FUSE_NO;
+	}
+	return ffdxe->fd_status == FD_FUSE_YES;
 }
 
 struct fusedump_timespec {

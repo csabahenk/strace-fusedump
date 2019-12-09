@@ -771,6 +771,7 @@ alloctcb(int pid)
 			tcp->currpers = current_personality;
 #endif
 			nprocs++;
+			fdcontext_link(tcp);
 			debug_msg("new tcb for pid %d, active tcbs:%d",
 				  tcp->pid, nprocs);
 			return tcp;
@@ -827,6 +828,8 @@ droptcb(struct tcb *tcp)
 	int p;
 	for (p = 0; p < SUPPORTED_PERSONALITIES; ++p)
 		free(tcp->inject_vec[p]);
+
+	fdcontext_drop(tcp);
 
 	free_tcb_priv_data(tcp);
 

@@ -246,6 +246,39 @@ struct inject_opts {
 
 # define MAX_ERRNO_VALUE			4095
 
+enum existence_spec {
+	IT_UNCERTAIN,
+	IT_IS,
+	IT_ISNT
+};
+
+struct fuse_fdcontext_entry {
+	unsigned fd_status;
+};
+
+struct fdcontext_entry {
+	struct fuse_fdcontext_entry fuse_fdcontext_entry;
+	bool extant;
+};
+
+struct fdcontext {
+	struct fdcontext_entry *entries;
+	int tgid;
+	int fd_maxplus;
+	int len;
+	int refcount;
+};
+
+struct fdcontexttab {
+	struct fdcontext *entries;
+	int index_maxplus;
+	int len;
+};
+
+extern struct fdcontexttab fdcontexttab;
+
+#define fdcontext(tcp) (fdcontexttab.entries + (tcp)->fdcontext_index)
+
 /* Trace Control Block */
 struct tcb {
 	int flags;		/* See below for TCB_ values */
@@ -289,6 +322,8 @@ struct tcb {
 	struct tcb_wait_data *delayed_wait_data;
 	struct list_item wait_list;
 
+	int tgid;
+	int fdcontext_index;
 
 # ifdef HAVE_LINUX_KVM_H
 	struct vcpu_info *vcpu_info_list;
@@ -1524,8 +1559,13 @@ scno_is_valid(kernel_ulong_t scno)
 # define SYS_FUNC(syscall_name) int SYS_FUNC_NAME(sys_ ## syscall_name)(struct tcb *tcp)
 
 extern int fuse_dumpfd;
-extern bool fuse_check(struct tcb *);
+extern bool fuse_check(struct tcb *, int, enum existence_spec);
 extern void fuse_printmark(struct tcb *, char);
 extern void fuse_dumpio(struct tcb *, kernel_ulong_t, size_t);
 
+extern void fdcontext_link(struct tcb *);
+extern void fdcontext_drop(struct tcb *);
+extern bool fdcontext_get_entry(struct tcb *, int, struct fdcontext_entry **);
+extern void fdcontext_del_entry(struct tcb *, int);
+extern void fdcontext_cleanup(struct tcb *);
 #endif /* !STRACE_DEFS_H */

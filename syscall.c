@@ -420,7 +420,29 @@ dumpio(struct tcb *tcp)
 static void
 dumpio_fuse(struct tcb *tcp)
 {
-	if (syserror(tcp) || !fuse_check(tcp))
+	int fd;
+	enum existence_spec extant;
+
+	if (syserror(tcp) || fuse_dumpfd == -1)
+		return;
+
+	switch (tcp_sysent(tcp)->sen) {
+	case SEN_open:
+	case SEN_openat:
+		fd = tcp->u_rval;
+		extant = IT_ISNT;
+		break;
+	case SEN_read:
+	case SEN_write:
+	case SEN_readv:
+	case SEN_writev:
+		fd = tcp->u_arg[0];
+		extant = IT_UNCERTAIN;
+		break;
+	default:
+		return;
+	}
+	if (!fuse_check(tcp, fd, extant))
 		return;
 
 	switch (tcp_sysent(tcp)->sen) {
@@ -963,6 +985,7 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
 	}
 	tprints("\n");
 	dumpio(tcp);
+	fdcontext_cleanup(tcp);
 	dumpio_fuse(tcp);
 	line_ended();
 
