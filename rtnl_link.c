@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2016 Fabien Siron <fabien.siron@epita.fr>
  * Copyright (c) 2017 JingPiao Chen <chenjingpiao@gmail.com>
- * Copyright (c) 2016-2018 The strace developers.
+ * Copyright (c) 2016-2019 The strace developers.
  * All rights reserved.
  *
  * SPDX-License-Identifier: LGPL-2.1-or-later
@@ -42,15 +42,95 @@
 #include "xlat/tun_device_types.h"
 #include "xlat/xdp_flags.h"
 
+typedef struct {
+	uint32_t rx_packets;
+	uint32_t tx_packets;
+	uint32_t rx_bytes;
+	uint32_t tx_bytes;
+	uint32_t rx_errors;
+	uint32_t tx_errors;
+	uint32_t rx_dropped;
+	uint32_t tx_dropped;
+	uint32_t multicast;
+	uint32_t collisions;
+	uint32_t rx_length_errors;
+	uint32_t rx_over_errors;
+	uint32_t rx_crc_errors;
+	uint32_t rx_frame_errors;
+	uint32_t rx_fifo_errors;
+	uint32_t rx_missed_errors;
+	uint32_t tx_aborted_errors;
+	uint32_t tx_carrier_errors;
+	uint32_t tx_fifo_errors;
+	uint32_t tx_heartbeat_errors;
+	uint32_t tx_window_errors;
+	uint32_t rx_compressed;
+	uint32_t tx_compressed;
+	uint32_t rx_nohandler; /**< Added by v4.6-rc1~91^2~329^2~2 */
+} struct_rtnl_link_stats;
+
+/** Added by Linux commit v2.6.35-rc1~473^2~759 */
+typedef struct {
+	uint64_t rx_packets;
+	uint64_t tx_packets;
+	uint64_t rx_bytes;
+	uint64_t tx_bytes;
+	uint64_t rx_errors;
+	uint64_t tx_errors;
+	uint64_t rx_dropped;
+	uint64_t tx_dropped;
+	uint64_t multicast;
+	uint64_t collisions;
+	uint64_t rx_length_errors;
+	uint64_t rx_over_errors;
+	uint64_t rx_crc_errors;
+	uint64_t rx_frame_errors;
+	uint64_t rx_fifo_errors;
+	uint64_t rx_missed_errors;
+	uint64_t tx_aborted_errors;
+	uint64_t tx_carrier_errors;
+	uint64_t tx_fifo_errors;
+	uint64_t tx_heartbeat_errors;
+	uint64_t tx_window_errors;
+	uint64_t rx_compressed;
+	uint64_t tx_compressed;
+	uint64_t rx_nohandler; /**< Added by v4.6-rc1~91^2~329^2~2 */
+} struct_rtnl_link_stats64;
+
+/** Added by Linux commit v2.6.35-rc1~473^2~33 */
+typedef struct {
+	uint8_t vsi_mgr_id;
+	uint8_t vsi_type_id[3];
+	uint8_t vsi_type_version;
+	uint8_t pad[3];
+} struct_ifla_port_vsi;
+
+#ifdef HAVE_STRUCT_RTNL_LINK_STATS_RX_NOHANDLER
+static_assert(sizeof(struct_rtnl_link_stats)
+	      == sizeof(struct rtnl_link_stats),
+	      "struct rtnl_link_stats size mismatch"
+	      ", please update the decoder");
+#endif
+#ifdef HAVE_STRUCT_RTNL_LINK_STATS64_RX_NOHANDLER
+static_assert(sizeof(struct_rtnl_link_stats64)
+	      == sizeof(struct rtnl_link_stats64),
+	      "struct rtnl_link_stats64 size mismatch"
+	      ", please update the decoder");
+#endif
+#ifdef HAVE_STRUCT_IFLA_PORT_VSI
+static_assert(sizeof(struct_ifla_port_vsi) == sizeof(struct ifla_port_vsi),
+	      "struct ifla_port_vsi size mismatch, please update the decoder");
+#endif
+
 static bool
 decode_rtnl_link_stats(struct tcb *const tcp,
 		       const kernel_ulong_t addr,
 		       const unsigned int len,
 		       const void *const opaque_data)
 {
-	struct rtnl_link_stats st;
+	struct_rtnl_link_stats st;
 	const unsigned int min_size =
-		offsetofend(struct rtnl_link_stats, tx_compressed);
+		offsetofend(struct_rtnl_link_stats, tx_compressed);
 	const unsigned int def_size = sizeof(st);
 	const unsigned int size =
 		(len >= def_size) ? def_size :
@@ -86,10 +166,9 @@ decode_rtnl_link_stats(struct tcb *const tcp,
 
 		PRINT_FIELD_U(", ", st, rx_compressed);
 		PRINT_FIELD_U(", ", st, tx_compressed);
-#ifdef HAVE_STRUCT_RTNL_LINK_STATS_RX_NOHANDLER
+
 		if (len >= def_size)
 			PRINT_FIELD_U(", ", st, rx_nohandler);
-#endif
 		tprints("}");
 	}
 
@@ -337,10 +416,8 @@ decode_nla_tun_type(struct tcb *const tcp,
 		    const unsigned int len,
 		    const void *const opaque_data)
 {
-	const struct decode_nla_xlat_opts opts = {
+	static const struct decode_nla_xlat_opts opts = {
 		.xlat = tun_device_types,
-		.xlat_size = ARRAY_SIZE(tun_device_types) - 1,
-		.xt = XT_INDEXED,
 		.dflt = "IFF_???",
 		.size = 1,
 	};
@@ -424,10 +501,9 @@ decode_rtnl_link_stats64(struct tcb *const tcp,
 			 const unsigned int len,
 			 const void *const opaque_data)
 {
-#ifdef HAVE_STRUCT_RTNL_LINK_STATS64
-	struct rtnl_link_stats64 st;
+	struct_rtnl_link_stats64 st;
 	const unsigned int min_size =
-		offsetofend(struct rtnl_link_stats64, tx_compressed);
+		offsetofend(struct_rtnl_link_stats64, tx_compressed);
 	const unsigned int def_size = sizeof(st);
 	const unsigned int size =
 		(len >= def_size) ? def_size :
@@ -463,17 +539,13 @@ decode_rtnl_link_stats64(struct tcb *const tcp,
 
 		PRINT_FIELD_U(", ", st, rx_compressed);
 		PRINT_FIELD_U(", ", st, tx_compressed);
-# ifdef HAVE_STRUCT_RTNL_LINK_STATS64_RX_NOHANDLER
+
 		if (len >= def_size)
 			PRINT_FIELD_U(", ", st, rx_nohandler);
-# endif
 		tprints("}");
 	}
 
 	return true;
-#else
-	return false;
-#endif
 }
 
 static bool
@@ -482,23 +554,24 @@ decode_ifla_port_vsi(struct tcb *const tcp,
 		     const unsigned int len,
 		     const void *const opaque_data)
 {
-#ifdef HAVE_STRUCT_IFLA_PORT_VSI
-	struct ifla_port_vsi vsi;
+	struct_ifla_port_vsi vsi;
 
 	if (len < sizeof(vsi))
 		return false;
-	else if (!umove_or_printaddr(tcp, addr, &vsi)) {
-		PRINT_FIELD_U("{", vsi, vsi_mgr_id);
-		PRINT_FIELD_STRING(", ", vsi, vsi_type_id,
-				   sizeof(vsi.vsi_type_id), QUOTE_FORCE_HEX);
-		PRINT_FIELD_U(", ", vsi, vsi_type_version);
-		tprints("}");
-	}
+	if (umove_or_printaddr(tcp, addr, &vsi))
+		return true;
+
+	PRINT_FIELD_U("{", vsi, vsi_mgr_id);
+	PRINT_FIELD_STRING(", ", vsi, vsi_type_id,
+			   sizeof(vsi.vsi_type_id), QUOTE_FORCE_HEX);
+	PRINT_FIELD_U(", ", vsi, vsi_type_version);
+
+	if (!IS_ARRAY_ZERO(vsi.pad))
+		PRINT_FIELD_HEX_ARRAY(", ", vsi, pad);
+
+	tprints("}");
 
 	return true;
-#else
-	return false;
-#endif
 }
 
 static const nla_decoder_t ifla_port_nla_decoders[] = {
@@ -563,10 +636,8 @@ decode_ifla_xdp_attached(struct tcb *const tcp,
 			 const unsigned int len,
 			 const void *const opaque_data)
 {
-	const struct decode_nla_xlat_opts opts = {
+	static const struct decode_nla_xlat_opts opts = {
 		.xlat = rtnl_ifla_xdp_attached_mode,
-		.xlat_size = ARRAY_SIZE(rtnl_ifla_xdp_attached_mode) - 1,
-		.xt = XT_INDEXED,
 		.dflt = "XDP_ATTACHED_???",
 		.size = 1,
 	};
@@ -628,10 +699,8 @@ decode_ifla_inet_conf(struct tcb *const tcp,
 
 	print_array_ex(tcp, addr, cnt, &elem, sizeof(elem),
 		       tfetch_mem, print_int32_array_member, NULL,
-		       PAF_PRINT_INDICES | PAF_INDEX_XLAT_VALUE_INDEXED
-			| XLAT_STYLE_FMT_D,
-		       ARRSZ_PAIR(inet_devconf_indices) - 1,
-		       "IPV4_DEVCONF_???");
+		       PAF_PRINT_INDICES | XLAT_STYLE_FMT_D,
+		       inet_devconf_indices, "IPV4_DEVCONF_???");
 
 	return true;
 }
@@ -646,8 +715,8 @@ decode_ifla_inet6_flags(struct tcb *const tcp,
 		        const unsigned int len,
 		        const void *const opaque_data)
 {
-	const struct decode_nla_xlat_opts opts = {
-		ARRSZ_PAIR(inet6_if_flags) - 1, "IF_???",
+	static const struct decode_nla_xlat_opts opts = {
+		inet6_if_flags, "IF_???",
 		.size = 4,
 	};
 
@@ -668,10 +737,8 @@ decode_ifla_inet6_conf(struct tcb *const tcp,
 
 	print_array_ex(tcp, addr, cnt, &elem, sizeof(elem),
 		       tfetch_mem, print_int32_array_member, NULL,
-		       PAF_PRINT_INDICES | PAF_INDEX_XLAT_VALUE_INDEXED
-			| XLAT_STYLE_FMT_D,
-		       ARRSZ_PAIR(inet6_devconf_indices) - 1,
-		       "DEVCONF_???");
+		       PAF_PRINT_INDICES | XLAT_STYLE_FMT_D,
+		       inet6_devconf_indices, "DEVCONF_???");
 
 	return true;
 }
@@ -690,9 +757,8 @@ decode_ifla_inet6_stats(struct tcb *const tcp,
 
 	print_array_ex(tcp, addr, cnt, &elem, sizeof(elem),
 		       tfetch_mem, print_uint64_array_member, NULL,
-		       PAF_PRINT_INDICES | PAF_INDEX_XLAT_VALUE_INDEXED
-			| XLAT_STYLE_FMT_U, ARRSZ_PAIR(snmp_ip_stats) - 1,
-		       "IPSTATS_MIB_???");
+		       PAF_PRINT_INDICES | XLAT_STYLE_FMT_U,
+		       snmp_ip_stats, "IPSTATS_MIB_???");
 
 	return true;
 }
@@ -737,9 +803,8 @@ decode_ifla_inet6_icmp6_stats(struct tcb *const tcp,
 
 	print_array_ex(tcp, addr, cnt, &elem, sizeof(elem),
 		       tfetch_mem, print_uint64_array_member, NULL,
-		       PAF_PRINT_INDICES | PAF_INDEX_XLAT_VALUE_INDEXED
-			| XLAT_STYLE_FMT_U, ARRSZ_PAIR(snmp_icmp6_stats) - 1,
-		       "ICMP6_MIB_???");
+		       PAF_PRINT_INDICES | XLAT_STYLE_FMT_U,
+		       snmp_icmp6_stats, "ICMP6_MIB_???");
 
 	return true;
 }
@@ -750,9 +815,8 @@ decode_ifla_inet6_agm(struct tcb *const tcp,
 		      const unsigned int len,
 		      const void *const opaque_data)
 {
-	const struct decode_nla_xlat_opts opts = {
-		ARRSZ_PAIR(in6_addr_gen_mode) - 1, "IN6_ADDR_GEN_MODE_???",
-		.xt = XT_INDEXED,
+	static const struct decode_nla_xlat_opts opts = {
+		in6_addr_gen_mode, "IN6_ADDR_GEN_MODE_???",
 		.size = 1,
 	};
 
@@ -887,10 +951,8 @@ DECL_NETLINK_ROUTE_DECODER(decode_ifinfomsg)
 		if (!umoven_or_printaddr(tcp, addr + offset,
 					 sizeof(ifinfo) - offset,
 					 (char *) &ifinfo + offset)) {
-			PRINT_FIELD_XVAL_SORTED_SIZED("", ifinfo, ifi_type,
-						      arp_hardware_types,
-						      arp_hardware_types_size,
-						      "ARPHRD_???");
+			PRINT_FIELD_XVAL("", ifinfo, ifi_type,
+					 arp_hardware_types, "ARPHRD_???");
 			PRINT_FIELD_IFINDEX(", ", ifinfo, ifi_index);
 			PRINT_FIELD_FLAGS(", ", ifinfo, ifi_flags,
 					  iffflags, "IFF_???");

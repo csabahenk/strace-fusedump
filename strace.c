@@ -3,7 +3,7 @@
  * Copyright (c) 1993 Branko Lankester <branko@hacktic.nl>
  * Copyright (c) 1993, 1994, 1995, 1996 Rick Sladkey <jrs@world.std.com>
  * Copyright (c) 1996-1999 Wichert Akkerman <wichert@cistron.nl>
- * Copyright (c) 1999-2018 The strace developers.
+ * Copyright (c) 1999-2019 The strace developers.
  * All rights reserved.
  *
  * SPDX-License-Identifier: LGPL-2.1-or-later
@@ -20,6 +20,7 @@
 #ifdef HAVE_PATHS_H
 # include <paths.h>
 #endif
+#include <getopt.h>
 #include <pwd.h>
 #include <grp.h>
 #include <dirent.h>
@@ -28,9 +29,9 @@
 #ifdef HAVE_PRCTL
 # include <sys/prctl.h>
 #endif
-#include <asm/unistd.h>
 
 #include "kill_save_errno.h"
+#include "filter_seccomp.h"
 #include "largefile_wrappers.h"
 #include "mmap_cache.h"
 #include "number_set.h"
@@ -85,13 +86,22 @@ enum {
 	INTR_ANYWHERE       = 1, /* don't block/ignore any signals */
 	INTR_WHILE_WAIT     = 2, /* block fatal signals while decoding syscall. default */
 	INTR_NEVER          = 3, /* block fatal signals. default if '-o FILE PROG' */
-	INTR_BLOCK_TSTP_TOO = 4, /* block fatal signals and SIGTSTP (^Z) */
+	INTR_BLOCK_TSTP_TOO = 4, /* block fatal signals and SIGTSTP (^Z); default if -D */
 	NUM_INTR_OPTS
 };
 static int opt_intr;
 /* We play with signal mask only if this mode is active: */
 #define interactive (opt_intr == INTR_WHILE_WAIT)
 
+enum {
+	DAEMONIZE_NONE        = 0,
+	DAEMONIZE_GRANDCHILD  = 1,
+	DAEMONIZE_NEW_PGROUP  = 2,
+	DAEMONIZE_NEW_SESSION = 3,
+
+	DAEMONIZE_OPTS_GUARD__,
+	MAX_DAEMONIZE_OPTS    = DAEMONIZE_OPTS_GUARD__ - 1
+};
 /*
  * daemonized_tracer supports -D option.
  * With this option, strace forks twice.
@@ -104,13 +114,10 @@ static int opt_intr;
  * wait() etc. Without -D, strace process gets lodged in between,
  * disrupting parent<->child link.
  */
-static bool daemonized_tracer;
+static unsigned int daemonized_tracer;
 
 static int post_attach_sigstop = TCB_IGNORE_ONE_SIGSTOP;
 #define use_seize (post_attach_sigstop == 0)
-
-/* Sometimes we want to print only succeeding syscalls. */
-bool not_failing_only;
 
 /* Show path associated with fd arguments */
 unsigned int show_fd_path;
@@ -143,12 +150,17 @@ static struct tcb *current_tcp;
 struct tcb_wait_data {
 	enum trace_event te; /**< Event passed to dispatch_event() */
 	int status;          /**< status, returned by wait4() */
+	unsigned long msg;   /**< Value returned by PTRACE_GETEVENTMSG */
 	siginfo_t si;        /**< siginfo, returned by PTRACE_GETSIGINFO */
 };
 
 static struct tcb **tcbtab;
 static unsigned int nprocs;
 static size_t tcbtabsize;
+
+static struct tcb_wait_data *tcb_wait_tab;
+static size_t tcb_wait_tab_size;
+
 
 #ifndef HAVE_PROGRAM_INVOCATION_NAME
 char *program_invocation_name;
@@ -157,7 +169,7 @@ char *program_invocation_name;
 unsigned os_release; /* generated from uname()'s u.release */
 
 static void detach(struct tcb *tcp);
-static void cleanup(void);
+static void cleanup(int sig);
 static void interrupt(int sig);
 
 #ifdef HAVE_SIG_ATOMIC_T
@@ -228,14 +240,23 @@ print_version(void)
 static void
 usage(void)
 {
+#ifdef ENABLE_STACKTRACE
+# define K_OPT "k"
+#else
+# define K_OPT ""
+#endif
+
 	printf("\
-usage: strace [-CdffhiqrtttTvVwxxy] [-I n] [-e expr]...\n\
-              [-a column] [-o file] [-s strsize] [-P path]...\n\
-              -p pid... / [-D] [-E var=val]... [-u username] PROG [ARGS]\n\
-   or: strace -c[dfw] [-I n] [-e expr]... [-O overhead] [-S sortby]\n\
-              -p pid... / [-D] [-E var=val]... [-u username] PROG [ARGS]\n\
+usage: strace [-ACdffhi" K_OPT "qqrtttTvVwxxyyzZ] [-I n] [-b execve] [-e expr]...\n\
+              [-a column] [-o file] [-s strsize] [-X format] [-P path]...\n\
+              [-p pid]... [--seccomp-bpf]\n\
+              { -p pid | [-DDD] [-E var=val]... [-u username] PROG [ARGS] }\n\
+   or: strace -c[dfwzZ] [-I n] [-b execve] [-e expr]... [-O overhead]\n\
+              [-S sortby] [-P path]... [-p pid]... [--seccomp-bpf]\n\
+              { -p pid | [-DDD] [-E var=val]... [-u username] PROG [ARGS] }\n\
 \n\
 Output format:\n\
+  -A             open the file provided in the -o option in append mode\n\
   -a column      alignment COLUMN for printing syscall results (default %d)\n\
   -i             print instruction pointer at time of syscall\n\
 "
@@ -247,33 +268,42 @@ Output format:\n\
 "\
   -o file        send trace output to FILE instead of stderr\n\
   -q             suppress messages about attaching, detaching, etc.\n\
+  -qq            suppress messages about process exit status as well.\n\
   -r             print relative timestamp\n\
   -s strsize     limit length of print strings to STRSIZE chars (default %d)\n\
   -t             print absolute timestamp\n\
   -tt            print absolute timestamp with usecs\n\
   -T             print time spent in each syscall\n\
+  -v             verbose mode: print entities unabbreviated\n\
   -x             print non-ascii strings in hex\n\
   -xx            print all strings in hex\n\
   -X format      set the format for printing of named constants and flags\n\
   -y             print paths associated with file descriptor arguments\n\
-  -yy            print protocol specific information associated with socket file descriptors\n\
+  -yy            print protocol specific information associated with socket\n\
+                 file descriptors\n\
 \n\
 Statistics:\n\
-  -c             count time, calls, and errors for each syscall and report summary\n\
+  -c             count time, calls, and errors for each syscall and report\n\
+                 summary\n\
   -C             like -c but also print regular output\n\
   -O overhead    set overhead for tracing syscalls to OVERHEAD usecs\n\
-  -S sortby      sort syscall counts by: time, calls, name, nothing (default %s)\n\
+  -S sortby      sort syscall counts by: time, calls, errors, name, nothing\n\
+                 (default %s)\n\
   -w             summarise syscall latency (default is system time)\n\
 \n\
 Filtering:\n\
   -e expr        a qualifying expression: option=[!]all or option=[!]val1[,val2]...\n\
-     options:    trace, abbrev, verbose, raw, signal, read, write, fault, inject, kvm, fuse"
-"\n\
+     options:    trace, abbrev, verbose, raw, signal, read, write, fault,\n\
+                 inject, status, kvm, fuse\n\
   -P path        trace accesses to path\n\
+  -z             print only syscalls that returned without an error code\n\
+  -Z             print only syscalls that returned with an error code\n\
 \n\
 Tracing:\n\
   -b execve      detach on execve syscall\n\
-  -D             run tracer process as a detached grandchild, not as parent\n\
+  -D             run tracer process as a grandchild, not as a parent\n\
+  -DD            run tracer process in a separate process group\n\
+  -DDD           run tracer process in a separate session\n\
   -f             follow forks\n\
   -ff            follow forks with output into separate files\n\
   -I interruptible\n\
@@ -290,26 +320,25 @@ Startup:\n\
   -u username    run command as username handling setuid and/or setgid\n\
 \n\
 Miscellaneous:\n\
+  --seccomp-bpf  enable seccomp-bpf filtering\n\
   -d             enable debug output to stderr\n\
-  -v             verbose mode: print unabbreviated argv, stat, termios, etc. args\n\
-  -h             print help message\n\
-  -V             print version\n\
+  -h, --help     print help message\n\
+  -V, --version  print version\n\
 "
 /* ancient, no one should use it
 -F -- attempt to follow vforks (deprecated, use -f)\n\
  */
-/* this is broken, so don't document it
--z -- print only succeeding syscalls\n\
- */
 , DEFAULT_ACOLUMN, DEFAULT_STRLEN, DEFAULT_SORTBY);
 	exit(0);
+
+#undef K_OPT
 }
 
 void ATTRIBUTE_NORETURN
 die(void)
 {
 	if (strace_tracer_pid == getpid()) {
-		cleanup();
+		cleanup(0);
 		exit(1);
 	}
 
@@ -393,7 +422,7 @@ set_cloexec_flag(int fd)
 {
 	int flags, newflags;
 
-	flags = fcntl(fd, F_GETFD);
+	flags = fcntl_fd(fd, F_GETFD);
 	if (flags < 0) {
 		/* Can happen only if fd is bad.
 		 * Should never happen: if it does, we have a bug
@@ -407,7 +436,7 @@ set_cloexec_flag(int fd)
 	if (flags == newflags)
 		return;
 
-	if (fcntl(fd, F_SETFD, newflags)) /* never fails */
+	if (fcntl_fd(fd, F_SETFD, newflags)) /* never fails */
 		perror_msg_and_die("fcntl(%d, F_SETFD, %#x)", fd, newflags);
 }
 
@@ -605,7 +634,8 @@ printleader(struct tcb *tcp)
 
 	if (printing_tcp) {
 		set_current_tcp(printing_tcp);
-		if (printing_tcp->curcol != 0 && (followfork < 2 || printing_tcp == tcp)) {
+		if (!tcp->staged_output_data && printing_tcp->curcol != 0 &&
+		    (followfork < 2 || printing_tcp == tcp)) {
 			/*
 			 * case 1: we have a shared log (i.e. not -ff), and last line
 			 * wasn't finished (same or different tcb, doesn't matter).
@@ -735,6 +765,7 @@ alloctcb(int pid)
 		tcp = tcbtab[i];
 		if (!tcp->pid) {
 			memset(tcp, 0, sizeof(*tcp));
+			list_init(&tcp->wait_list);
 			tcp->pid = pid;
 #if SUPPORTED_PERSONALITIES > 1
 			tcp->currpers = current_personality;
@@ -785,6 +816,14 @@ droptcb(struct tcb *tcp)
 	if (tcp->pid == 0)
 		return;
 
+	if (cflag && debug_flag) {
+		struct timespec dt;
+
+		ts_sub(&dt, &tcp->stime, &tcp->atime);
+		debug_func_msg("pid %d: %.9f seconds of system time spent "
+			       "since attach", tcp->pid, ts_float(&dt));
+	}
+
 	int p;
 	for (p = 0; p < SUPPORTED_PERSONALITIES; ++p)
 		free(tcp->inject_vec[p]);
@@ -807,12 +846,18 @@ droptcb(struct tcb *tcp)
 	debug_msg("dropped tcb for pid %d, %d remain", tcp->pid, nprocs);
 
 	if (tcp->outf) {
+		bool publish = true;
+		if (!is_complete_set(status_set, NUMBER_OF_STATUSES)) {
+			publish = is_number_in_set(STATUS_DETACHED, status_set);
+			strace_close_memstream(tcp, publish);
+		}
+
 		if (followfork >= 2) {
-			if (tcp->curcol != 0)
+			if (tcp->curcol != 0 && publish)
 				fprintf(tcp->outf, " <detached ...>\n");
 			fclose(tcp->outf);
 		} else {
-			if (printing_tcp == tcp && tcp->curcol != 0)
+			if (printing_tcp == tcp && tcp->curcol != 0 && publish)
 				fprintf(tcp->outf, " <detached ...>\n");
 			flush_tcp_output(tcp);
 		}
@@ -822,6 +867,8 @@ droptcb(struct tcb *tcp)
 		set_current_tcp(NULL);
 	if (printing_tcp == tcp)
 		printing_tcp = NULL;
+
+	list_remove(&tcp->wait_list);
 
 	memset(tcp, 0, sizeof(*tcp));
 }
@@ -1097,6 +1144,27 @@ startup_attach(void)
 		/* grandchild */
 		/* We will be the tracer process. Remember our new pid: */
 		strace_tracer_pid = getpid();
+
+		switch (daemonized_tracer) {
+		case DAEMONIZE_NEW_PGROUP:
+			/*
+			 * If -D is passed twice, create a new process group,
+			 * so we won't be killed by kill(0, ...).
+			 */
+			if (setpgid(0, 0) < 0)
+				perror_msg_and_die("Cannot create a new"
+						   " process group");
+			break;
+		case DAEMONIZE_NEW_SESSION:
+			/*
+			 * If -D is passed thrice, create a new session,
+			 * so we won't be killed upon session termination.
+			 */
+			if (setsid() < 0)
+				perror_msg_and_die("Cannot create a new"
+						   " session");
+			break;
+		}
 	}
 
 	for (tcbi = 0; tcbi < tcbtabsize; tcbi++) {
@@ -1198,6 +1266,10 @@ exec_or_die(void)
 	if (params_for_tracee.child_sa.sa_handler != SIG_DFL)
 		sigaction(SIGCHLD, &params_for_tracee.child_sa, NULL);
 
+	debug_msg("seccomp filter %s",
+		  seccomp_filtering ? "enabled" : "disabled");
+	if (seccomp_filtering)
+		init_seccomp_filter();
 	execv(params->pathname, params->argv);
 	perror_msg_and_die("exec");
 }
@@ -1269,7 +1341,7 @@ redirect_standard_fds(void)
 static void
 startup_child(char **argv)
 {
-	struct_stat statbuf;
+	strace_stat_t statbuf;
 	const char *filename;
 	size_t filename_len;
 	char pathname[PATH_MAX];
@@ -1436,6 +1508,10 @@ startup_child(char **argv)
 		 * to create a genuine separate stack and execute on it.
 		 */
 	}
+
+	if (seccomp_filtering)
+		tcp->flags |= TCB_SECCOMP_FILTER;
+
 	/*
 	 * A case where straced process is part of a pipe:
 	 * { sleep 1; yes | head -n99999; } | strace -o/dev/null sh -c 'exec <&-; sleep 9'
@@ -1500,35 +1576,29 @@ test_ptrace_seize(void)
 	}
 }
 
-static unsigned
+static unsigned int
 get_os_release(void)
 {
-	unsigned rel;
-	const char *p;
 	struct utsname u;
 	if (uname(&u) < 0)
 		perror_msg_and_die("uname");
-	/* u.release has this form: "3.2.9[-some-garbage]" */
-	rel = 0;
-	p = u.release;
-	for (;;) {
-		if (!(*p >= '0' && *p <= '9'))
-			error_msg_and_die("Bad OS release string: '%s'", u.release);
-		/* Note: this open-codes KERNEL_VERSION(): */
-		rel = (rel << 8) | atoi(p);
-		if (rel >= KERNEL_VERSION(1, 0, 0))
-			break;
-		while (*p >= '0' && *p <= '9')
-			p++;
-		if (*p != '.') {
-			if (rel >= KERNEL_VERSION(0, 1, 0)) {
-				/* "X.Y-something" means "X.Y.0" */
-				rel <<= 8;
-				break;
-			}
-			error_msg_and_die("Bad OS release string: '%s'", u.release);
+	/*
+	 * u.release string consists of at most three parts
+	 * and normally has this form: "3.2.9[-some-garbage]",
+	 * "X.Y-something" means "X.Y.0".
+	 */
+	const char *p = u.release;
+	unsigned int rel = 0;
+	for (unsigned int parts = 0; parts < 3; ++parts) {
+		unsigned int n = 0;
+		for (; (*p >= '0') && (*p <= '9'); ++p) {
+			n *= 10;
+			n += *p - '0';
 		}
-		p++;
+		rel <<= 8;
+		rel |= n;
+		if (*p == '.')
+			++p;
 	}
 	return rel;
 }
@@ -1552,7 +1622,7 @@ static void ATTRIBUTE_NOINLINE
 init(int argc, char *argv[])
 {
 	int c, i;
-	int optF = 0;
+	int optF = 0, zflags = 0;
 
 	if (!program_invocation_name || !*program_invocation_name) {
 		static char name[] = "strace";
@@ -1570,15 +1640,29 @@ init(int argc, char *argv[])
 	qualify("trace=all");
 	qualify("abbrev=all");
 	qualify("verbose=all");
+	qualify("status=all");
 #if DEFAULT_QUAL_FLAGS != (QUAL_TRACE | QUAL_ABBREV | QUAL_VERBOSE)
 # error Bug in DEFAULT_QUAL_FLAGS
 #endif
 	qualify("signal=all");
-	while ((c = getopt(argc, argv, "+"
+
+	static const char optstring[] = "+"
 #ifdef ENABLE_STACKTRACE
 	    "k"
 #endif
-	    "a:Ab:cCdDe:E:fFhiI:o:O:p:P:qrs:S:tTu:vVwxX:yz")) != EOF) {
+	    "a:Ab:cCdDe:E:fFhiI:o:O:p:P:qrs:S:tTu:vVwxX:yzZ";
+
+	enum {
+		SECCOMP_OPTION = 0x100
+	};
+	static const struct option longopts[] = {
+		{ "seccomp-bpf", no_argument, 0, SECCOMP_OPTION },
+		{ "help", no_argument, 0, 'h' },
+		{ "version", no_argument, 0, 'V' },
+		{ 0, 0, 0, 0 }
+	};
+
+	while ((c = getopt_long(argc, argv, optstring, longopts, NULL)) != EOF) {
 		switch (c) {
 		case 'a':
 			acolumn = string_to_uint(optarg);
@@ -1610,7 +1694,7 @@ init(int argc, char *argv[])
 			debug_flag = 1;
 			break;
 		case 'D':
-			daemonized_tracer = 1;
+			daemonized_tracer++;
 			break;
 		case 'e':
 			qualify(optarg);
@@ -1645,10 +1729,8 @@ init(int argc, char *argv[])
 			outfname = optarg;
 			break;
 		case 'O':
-			i = string_to_uint(optarg);
-			if (i < 0)
+			if (set_overhead(optarg) < 0)
 				error_opt_arg(c, optarg);
-			set_overhead(i);
 			break;
 		case 'p':
 			process_opt_p_list(optarg);
@@ -1707,7 +1789,17 @@ init(int argc, char *argv[])
 			show_fd_path++;
 			break;
 		case 'z':
-			not_failing_only = 1;
+			clear_number_set_array(status_set, 1);
+			add_number_to_set(STATUS_SUCCESSFUL, status_set);
+			zflags++;
+			break;
+		case 'Z':
+			clear_number_set_array(status_set, 1);
+			add_number_to_set(STATUS_FAILED, status_set);
+			zflags++;
+			break;
+		case SECCOMP_OPTION:
+			seccomp_filtering = true;
 			break;
 		default:
 			error_msg_and_help(NULL);
@@ -1724,6 +1816,27 @@ init(int argc, char *argv[])
 
 	if (!argc && daemonized_tracer) {
 		error_msg_and_help("PROG [ARGS] must be specified with -D");
+	}
+
+	if (daemonized_tracer > (unsigned int) MAX_DAEMONIZE_OPTS)
+		error_msg_and_help("Too many -D's (%u), maximum supported -D "
+				   "count is %d",
+				   daemonized_tracer, MAX_DAEMONIZE_OPTS);
+
+	if (seccomp_filtering && detach_on_execve) {
+		error_msg("--seccomp-bpf is not enabled because"
+			  " it is not compatible with -b");
+		seccomp_filtering = false;
+	}
+
+	if (seccomp_filtering) {
+		if (nprocs && (!argc || debug_flag))
+			error_msg("--seccomp-bpf is not enabled for processes"
+				  " attached with -p");
+		if (!followfork) {
+			error_msg("--seccomp-bpf implies -f");
+			followfork = 1;
+		}
 	}
 
 	if (optF) {
@@ -1759,6 +1872,15 @@ init(int argc, char *argv[])
 			error_msg("-%c has no effect with -c", 'y');
 	}
 
+#ifndef HAVE_OPEN_MEMSTREAM
+	if (!is_complete_set(status_set, NUMBER_OF_STATUSES))
+		error_msg_and_help("open_memstream is required to use -z, -Z, or -e status");
+#endif
+
+	if (zflags > 1)
+		error_msg("Only the last of -z/-Z options will take effect. "
+			  "See status qualifier for more complex filters.");
+
 	acolumn_spaces = xmalloc(acolumn + 1);
 	memset(acolumn_spaces, ' ', acolumn);
 	acolumn_spaces[acolumn] = '\0';
@@ -1792,6 +1914,12 @@ init(int argc, char *argv[])
 		ptrace_setoptions |= PTRACE_O_TRACECLONE |
 				     PTRACE_O_TRACEFORK |
 				     PTRACE_O_TRACEVFORK;
+
+	if (seccomp_filtering)
+		check_seccomp_filter();
+	if (seccomp_filtering)
+		ptrace_setoptions |= PTRACE_O_TRACESECCOMP;
+
 	debug_msg("ptrace_setoptions = %#x", ptrace_setoptions);
 	test_ptrace_seize();
 	test_ptrace_get_syscall_info();
@@ -1845,6 +1973,8 @@ init(int argc, char *argv[])
 	 * no		1	1	INTR_WHILE_WAIT
 	 */
 
+	if (daemonized_tracer && !opt_intr)
+		opt_intr = INTR_BLOCK_TSTP_TOO;
 	if (outfname && argc) {
 		if (!opt_intr)
 			opt_intr = INTR_NEVER;
@@ -1924,14 +2054,11 @@ pid2tcb(const int pid)
 }
 
 static void
-cleanup(void)
+cleanup(int fatal_sig)
 {
 	unsigned int i;
 	struct tcb *tcp;
-	int fatal_sig;
 
-	/* 'interrupted' is a volatile object, fetch it only once */
-	fatal_sig = interrupted;
 	if (!fatal_sig)
 		fatal_sig = SIGTERM;
 
@@ -1980,6 +2107,7 @@ print_debug_info(const int pid, int status)
 			[PTRACE_EVENT_VFORK_DONE] = "VFORK_DONE",
 			[PTRACE_EVENT_EXEC]  = "EXEC",
 			[PTRACE_EVENT_EXIT]  = "EXIT",
+			[PTRACE_EVENT_SECCOMP]  = "SECCOMP",
 			/* [PTRACE_EVENT_STOP (=128)] would make biggish array */
 		};
 		const char *e = "??";
@@ -2029,37 +2157,60 @@ maybe_allocate_tcb(const int pid, int status)
 	}
 }
 
+/*
+ * Under Linux, execve changes pid to thread leader's pid, and we see this
+ * changed pid on EVENT_EXEC and later, execve sysexit.  Leader "disappears"
+ * without exit notification.  Let user know that, drop leader's tcb, and fix
+ * up pid in execve thread's tcb.  Effectively, execve thread's tcb replaces
+ * leader's tcb.
+ *
+ * BTW, leader is 'stuck undead' (doesn't report WIFEXITED on exit syscall)
+ * in multi-threaded programs exactly in order to handle this case.
+ */
 static struct tcb *
 maybe_switch_tcbs(struct tcb *tcp, const int pid)
 {
-	FILE *fp;
-	struct tcb *execve_thread;
-	long old_pid = 0;
+	/*
+	 * PTRACE_GETEVENTMSG returns old pid starting from Linux 3.0.
+	 * On 2.6 and earlier it can return garbage.
+	 */
+	if (os_release < KERNEL_VERSION(3, 0, 0))
+		return NULL;
 
-	if (ptrace(PTRACE_GETEVENTMSG, pid, NULL, &old_pid) < 0)
-		return tcp;
+	const long old_pid = tcb_wait_tab[tcp->wait_data_idx].msg;
+
 	/* Avoid truncation in pid2tcb() param passing */
 	if (old_pid <= 0 || old_pid == pid)
-		return tcp;
+		return NULL;
 	if ((unsigned long) old_pid > UINT_MAX)
-		return tcp;
-	execve_thread = pid2tcb(old_pid);
+		return NULL;
+	struct tcb *execve_thread = pid2tcb(old_pid);
 	/* It should be !NULL, but I feel paranoid */
 	if (!execve_thread)
-		return tcp;
+		return NULL;
 
 	if (execve_thread->curcol != 0) {
 		/*
-		 * One case we are here is -ff:
-		 * try "strace -oLOG -ff test/threaded_execve"
+		 * One case we are here is -ff, try
+		 * "strace -oLOG -ff test/threaded_execve".
+		 * Another case is demonstrated by
+		 * tests/maybe_switch_current_tcp.c
 		 */
 		fprintf(execve_thread->outf, " <pid changed to %d ...>\n", pid);
 		/*execve_thread->curcol = 0; - no need, see code below */
 	}
-	/* Swap output FILEs (needed for -ff) */
-	fp = execve_thread->outf;
+	/* Swap output FILEs and memstream (needed for -ff) */
+	FILE *fp = execve_thread->outf;
 	execve_thread->outf = tcp->outf;
 	tcp->outf = fp;
+	if (execve_thread->staged_output_data || tcp->staged_output_data) {
+		struct staged_output_data *staged_output_data;
+
+		staged_output_data = execve_thread->staged_output_data;
+		execve_thread->staged_output_data = tcp->staged_output_data;
+		tcp->staged_output_data = staged_output_data;
+	}
+
 	/* And their column positions */
 	execve_thread->curcol = tcp->curcol;
 	tcp->curcol = 0;
@@ -2072,8 +2223,25 @@ maybe_switch_tcbs(struct tcb *tcp, const int pid)
 		printleader(tcp);
 		tprintf("+++ superseded by execve in pid %lu +++\n", old_pid);
 		line_ended();
+		/*
+		 * Need to reopen memstream for thread
+		 * as we closed it in droptcb.
+		 */
+		if (!is_complete_set(status_set, NUMBER_OF_STATUSES))
+			strace_open_memstream(tcp);
 		tcp->flags |= TCB_REPRINT;
 	}
+
+	return tcp;
+}
+
+static struct tcb *
+maybe_switch_current_tcp(void)
+{
+	struct tcb *tcp = maybe_switch_tcbs(current_tcp, current_tcp->pid);
+
+	if (tcp)
+		set_current_tcp(tcp);
 
 	return tcp;
 }
@@ -2154,6 +2322,10 @@ startup_tcb(struct tcb *tcp)
 
 	if ((tcp->flags & TCB_GRABBED) && (get_scno(tcp) == 1))
 		tcp->s_prev_ent = tcp->s_ent;
+
+	if (cflag) {
+		tcp->atime = tcp->stime;
+	}
 }
 
 static void
@@ -2187,22 +2359,82 @@ print_event_exit(struct tcb *tcp)
 	tprints(") ");
 	tabto();
 	tprints("= ?\n");
+	if (!is_complete_set(status_set, NUMBER_OF_STATUSES)) {
+		bool publish = is_number_in_set(STATUS_UNFINISHED, status_set);
+		strace_close_memstream(tcp, publish);
+	}
 	line_ended();
+}
+
+static size_t
+trace_wait_data_size(struct tcb *tcp)
+{
+	return sizeof(struct tcb_wait_data);
+}
+
+static struct tcb_wait_data *
+init_trace_wait_data(void *p)
+{
+	struct tcb_wait_data *wd = p;
+
+	memset(wd, 0, sizeof(*wd));
+
+	return wd;
+}
+
+static struct tcb_wait_data *
+copy_trace_wait_data(const struct tcb_wait_data *wd)
+{
+	struct tcb_wait_data *new_wd = xmalloc(sizeof(*new_wd));
+
+	memcpy(new_wd, wd, sizeof(*wd));
+
+	return new_wd;
+}
+
+static void
+free_trace_wait_data(struct tcb_wait_data *wd)
+{
+	free(wd);
+}
+
+static void
+tcb_wait_tab_check_size(const size_t size)
+{
+	while (size >= tcb_wait_tab_size) {
+		tcb_wait_tab = xgrowarray(tcb_wait_tab,
+					  &tcb_wait_tab_size,
+					  sizeof(tcb_wait_tab[0]));
+	}
 }
 
 static const struct tcb_wait_data *
 next_event(void)
 {
-	static struct tcb_wait_data wait_data;
-
-	int pid;
-	int status;
-	struct tcb *tcp;
-	struct tcb_wait_data *wd = &wait_data;
-	struct rusage ru;
-
 	if (interrupted)
 		return NULL;
+
+	invalidate_umove_cache();
+
+	struct tcb *tcp = NULL;
+	struct list_item *elem;
+
+	static EMPTY_LIST(pending_tcps);
+	/* Handle the queued tcbs before waiting for new events.  */
+	if (!list_is_empty(&pending_tcps))
+		goto next_event_get_tcp;
+
+	static struct tcb *extra_tcp;
+	static size_t wait_extra_data_idx;
+	/* Handle the extra tcb event.  */
+	if (extra_tcp) {
+		tcp = extra_tcp;
+		extra_tcp = NULL;
+		tcp->wait_data_idx = wait_extra_data_idx;
+
+		debug_msg("dequeued extra event for pid %u", tcp->pid);
+		goto next_event_exit;
+	}
 
 	/*
 	 * Used to exit simply when nprocs hits zero, but in this testcase:
@@ -2245,8 +2477,10 @@ next_event(void)
 	 * then the system call will be interrupted and
 	 * the expiration will be handled by the signal handler.
 	 */
-	pid = wait4(-1, &status, __WALL, (cflag ? &ru : NULL));
-	const int wait_errno = errno;
+	int status;
+	struct rusage ru;
+	int pid = wait4(-1, &status, __WALL, (cflag ? &ru : NULL));
+	int wait_errno = errno;
 
 	/*
 	 * The window of opportunity to handle expirations
@@ -2262,135 +2496,201 @@ next_event(void)
 			return NULL;
 	}
 
-	if (pid < 0) {
-		if (wait_errno == EINTR) {
-			wd->te = TE_NEXT;
-			return wd;
+	size_t wait_tab_pos = 0;
+	bool wait_nohang = false;
+
+	/*
+	 * Wait for new events until wait4() returns 0 (meaning that there's
+	 * nothing more to wait for for now), or a second event for some tcb
+	 * appears (which may happen if a tracee was SIGKILL'ed, for example).
+	 */
+	for (;;) {
+		struct tcb_wait_data *wd;
+
+		if (pid < 0) {
+			if (wait_errno == EINTR)
+				break;
+			if (wait_nohang)
+				break;
+			if (nprocs == 0 && wait_errno == ECHILD)
+				return NULL;
+			/*
+			 * If nprocs > 0, ECHILD is not expected,
+			 * treat it as any other error here:
+			 */
+			errno = wait_errno;
+			perror_msg_and_die("wait4(__WALL)");
 		}
-		if (nprocs == 0 && wait_errno == ECHILD)
-			return NULL;
-		/*
-		 * If nprocs > 0, ECHILD is not expected,
-		 * treat it as any other error here:
-		 */
-		errno = wait_errno;
-		perror_msg_and_die("wait4(__WALL)");
-	}
 
-	wd->status = status;
+		if (!pid)
+			break;
 
-	if (pid == popen_pid) {
-		if (!WIFSTOPPED(status))
-			popen_pid = 0;
-		wd->te = TE_NEXT;
-		return wd;
-	}
+		if (pid == popen_pid) {
+			if (!WIFSTOPPED(status))
+				popen_pid = 0;
+			break;
+		}
 
-	if (debug_flag)
-		print_debug_info(pid, status);
+		if (debug_flag)
+			print_debug_info(pid, status);
 
-	/* Look up 'pid' in our table. */
-	tcp = pid2tcb(pid);
+		/* Look up 'pid' in our table. */
+		tcp = pid2tcb(pid);
 
-	if (!tcp) {
-		tcp = maybe_allocate_tcb(pid, status);
 		if (!tcp) {
-			wd->te = TE_NEXT;
-			return wd;
+			tcp = maybe_allocate_tcb(pid, status);
+			if (!tcp)
+				goto next_event_wait_next;
 		}
+
+		if (cflag) {
+			tcp->stime.tv_sec = ru.ru_stime.tv_sec;
+			tcp->stime.tv_nsec = ru.ru_stime.tv_usec * 1000;
+		}
+
+		tcb_wait_tab_check_size(wait_tab_pos);
+
+		/* Initialise a new wait data structure.  */
+		wd = tcb_wait_tab + wait_tab_pos;
+		init_trace_wait_data(wd);
+		wd->status = status;
+
+		if (WIFSIGNALED(status)) {
+			wd->te = TE_SIGNALLED;
+		} else if (WIFEXITED(status)) {
+			wd->te = TE_EXITED;
+		} else {
+			/*
+			 * As WCONTINUED flag has not been specified to wait4,
+			 * it cannot be WIFCONTINUED(status), so the only case
+			 * that remains is WIFSTOPPED(status).
+			 */
+
+			const unsigned int sig = WSTOPSIG(status);
+			const unsigned int event = (unsigned int) status >> 16;
+
+			switch (event) {
+			case 0:
+				/*
+				 * Is this post-attach SIGSTOP?
+				 * Interestingly, the process may stop
+				 * with STOPSIG equal to some other signal
+				 * than SIGSTOP if we happened to attach
+				 * just before the process takes a signal.
+				 */
+				if (sig == SIGSTOP &&
+				    (tcp->flags & TCB_IGNORE_ONE_SIGSTOP)) {
+					debug_func_msg("ignored SIGSTOP on "
+						       "pid %d", tcp->pid);
+					tcp->flags &= ~TCB_IGNORE_ONE_SIGSTOP;
+					wd->te = TE_RESTART;
+				} else if (sig == syscall_trap_sig) {
+					wd->te = TE_SYSCALL_STOP;
+				} else {
+					/*
+					 * True if tracee is stopped by signal
+					 * (as opposed to "tracee received
+					 * signal").
+					 * TODO: shouldn't we check for
+					 * errno == EINVAL too?
+					 * We can get ESRCH instead, you know...
+					 */
+					bool stopped = ptrace(PTRACE_GETSIGINFO,
+						pid, 0, &wd->si) < 0;
+
+					wd->te = stopped ? TE_GROUP_STOP
+							 : TE_SIGNAL_DELIVERY_STOP;
+				}
+				break;
+			case PTRACE_EVENT_STOP:
+				/*
+				 * PTRACE_INTERRUPT-stop or group-stop.
+				 * PTRACE_INTERRUPT-stop has sig == SIGTRAP here.
+				 */
+				switch (sig) {
+				case SIGSTOP:
+				case SIGTSTP:
+				case SIGTTIN:
+				case SIGTTOU:
+					wd->te = TE_GROUP_STOP;
+					break;
+				default:
+					wd->te = TE_RESTART;
+				}
+				break;
+			case PTRACE_EVENT_EXEC:
+					/*
+					 * TODO: shouldn't we check for
+					 * errno == EINVAL here, too?
+					 * We can get ESRCH instead, you know...
+					 */
+				if (ptrace(PTRACE_GETEVENTMSG, pid, NULL,
+				    &wd->msg) < 0)
+					wd->msg = 0;
+
+				wd->te = TE_STOP_BEFORE_EXECVE;
+				break;
+			case PTRACE_EVENT_EXIT:
+				wd->te = TE_STOP_BEFORE_EXIT;
+				break;
+			case PTRACE_EVENT_SECCOMP:
+				wd->te = TE_SECCOMP;
+				break;
+			default:
+				wd->te = TE_RESTART;
+			}
+		}
+
+		if (!wd->te)
+			error_func_msg("Tracing event hasn't been determined "
+				       "for pid %d, status %0#x", pid, status);
+
+		if (!list_is_empty(&tcp->wait_list)) {
+			wait_extra_data_idx = wait_tab_pos;
+			extra_tcp = tcp;
+			debug_func_msg("queued extra pid %d", tcp->pid);
+		} else {
+			tcp->wait_data_idx = wait_tab_pos;
+			list_append(&pending_tcps, &tcp->wait_list);
+			debug_func_msg("queued pid %d", tcp->pid);
+		}
+
+		wait_tab_pos++;
+
+		if (extra_tcp)
+			break;
+
+next_event_wait_next:
+		pid = wait4(-1, &status, __WALL | WNOHANG, (cflag ? &ru : NULL));
+		wait_errno = errno;
+		wait_nohang = true;
 	}
+
+next_event_get_tcp:
+	elem = list_remove_head(&pending_tcps);
+
+	if (!elem) {
+		tcb_wait_tab_check_size(0);
+		memset(tcb_wait_tab, 0, sizeof(*tcb_wait_tab));
+		tcb_wait_tab->te = TE_NEXT;
+
+		return tcb_wait_tab;
+	} else {
+		tcp = list_elem(elem, struct tcb, wait_list);
+		debug_func_msg("dequeued pid %d", tcp->pid);
+	}
+
+next_event_exit:
+	/* Is this the very first time we see this tracee stopped? */
+	if (tcp->flags & TCB_STARTUP)
+		startup_tcb(tcp);
 
 	clear_regs(tcp);
 
 	/* Set current output file */
 	set_current_tcp(tcp);
 
-	if (cflag) {
-		struct timespec stime = {
-			.tv_sec = ru.ru_stime.tv_sec,
-			.tv_nsec = ru.ru_stime.tv_usec * 1000
-		};
-		ts_sub(&tcp->dtime, &stime, &tcp->stime);
-		tcp->stime = stime;
-	}
-
-	if (WIFSIGNALED(status)) {
-		wd->te = TE_SIGNALLED;
-		return wd;
-	}
-
-	if (WIFEXITED(status)) {
-		wd->te = TE_EXITED;
-		return wd;
-	}
-
-	/*
-	 * As WCONTINUED flag has not been specified to wait4,
-	 * it cannot be WIFCONTINUED(status), so the only case
-	 * that remains is WIFSTOPPED(status).
-	 */
-
-	/* Is this the very first time we see this tracee stopped? */
-	if (tcp->flags & TCB_STARTUP)
-		startup_tcb(tcp);
-
-	const unsigned int sig = WSTOPSIG(status);
-	const unsigned int event = (unsigned int) status >> 16;
-
-	switch (event) {
-	case 0:
-		/*
-		 * Is this post-attach SIGSTOP?
-		 * Interestingly, the process may stop
-		 * with STOPSIG equal to some other signal
-		 * than SIGSTOP if we happened to attach
-		 * just before the process takes a signal.
-		 */
-		if (sig == SIGSTOP && (tcp->flags & TCB_IGNORE_ONE_SIGSTOP)) {
-			debug_func_msg("ignored SIGSTOP on pid %d", tcp->pid);
-			tcp->flags &= ~TCB_IGNORE_ONE_SIGSTOP;
-			wd->te = TE_RESTART;
-		} else if (sig == syscall_trap_sig) {
-			wd->te = TE_SYSCALL_STOP;
-		} else {
-			memset(&wd->si, 0, sizeof(wd->si));
-			/*
-			 * True if tracee is stopped by signal
-			 * (as opposed to "tracee received signal").
-			 * TODO: shouldn't we check for errno == EINVAL too?
-			 * We can get ESRCH instead, you know...
-			 */
-			bool stopped = ptrace(PTRACE_GETSIGINFO, pid, 0, &wd->si) < 0;
-			wd->te = stopped ? TE_GROUP_STOP : TE_SIGNAL_DELIVERY_STOP;
-		}
-		break;
-	case PTRACE_EVENT_STOP:
-		/*
-		 * PTRACE_INTERRUPT-stop or group-stop.
-		 * PTRACE_INTERRUPT-stop has sig == SIGTRAP here.
-		 */
-		switch (sig) {
-		case SIGSTOP:
-		case SIGTSTP:
-		case SIGTTIN:
-		case SIGTTOU:
-			wd->te = TE_GROUP_STOP;
-			break;
-		default:
-			wd->te = TE_RESTART;
-		}
-		break;
-	case PTRACE_EVENT_EXEC:
-		wd->te = TE_STOP_BEFORE_EXECVE;
-		break;
-	case PTRACE_EVENT_EXIT:
-		wd->te = TE_STOP_BEFORE_EXIT;
-		break;
-	default:
-		wd->te = TE_RESTART;
-	}
-
-	return wd;
+	return tcb_wait_tab + tcp->wait_data_idx;
 }
 
 static int
@@ -2421,7 +2721,7 @@ trace_syscall(struct tcb *tcp, unsigned int *sig)
 static bool
 dispatch_event(const struct tcb_wait_data *wd)
 {
-	unsigned int restart_op = PTRACE_SYSCALL;
+	unsigned int restart_op;
 	unsigned int restart_sig = 0;
 	enum trace_event te = wd ? wd->te : TE_BREAK;
 	/*
@@ -2429,6 +2729,11 @@ dispatch_event(const struct tcb_wait_data *wd)
 	 * around union wait fixed by glibc commit glibc-2.24~391
 	 */
 	int status = wd ? wd->status : 0;
+
+	if (current_tcp && has_seccomp_filter(current_tcp))
+		restart_op = seccomp_filter_restart_operator(current_tcp);
+	else
+		restart_op = PTRACE_SYSCALL;
 
 	switch (te) {
 	case TE_BREAK:
@@ -2439,6 +2744,27 @@ dispatch_event(const struct tcb_wait_data *wd)
 
 	case TE_RESTART:
 		break;
+
+	case TE_SECCOMP:
+		if (!has_seccomp_filter(current_tcp)) {
+			/*
+			 * We don't know if forks/clones have a seccomp filter
+			 * when they are created, but we can detect it when we
+			 * have a seccomp-stop.
+			 * In such a case, if !seccomp_before_sysentry, we have
+			 * already processed the syscall entry, so we avoid
+			 * processing it a second time.
+			 */
+			current_tcp->flags |= TCB_SECCOMP_FILTER;
+			restart_op = PTRACE_SYSCALL;
+			break;
+		}
+
+		if (seccomp_before_sysentry) {
+			restart_op = PTRACE_SYSCALL;
+			break;
+		}
+		ATTRIBUTE_FALLTHROUGH;
 
 	case TE_SYSCALL_STOP:
 		if (trace_syscall(current_tcp, &restart_sig) < 0) {
@@ -2454,6 +2780,42 @@ dispatch_event(const struct tcb_wait_data *wd)
 			 * normally, via WIFEXITED or WIFSIGNALED wait status.
 			 */
 			return true;
+		}
+		if (has_seccomp_filter(current_tcp)) {
+			/*
+			 * Syscall and seccomp stops can happen in different
+			 * orders depending on kernel.  strace tests this in
+			 * check_seccomp_order_tracer().
+			 *
+			 * Linux 3.5--4.7:
+			 * (seccomp-stop before syscall-entry-stop)
+			 *         +--> seccomp-stop ->-PTRACE_SYSCALL->-+
+			 *         |                                     |
+			 *     PTRACE_CONT                   syscall-entry-stop
+			 *         |                                     |
+			 * syscall-exit-stop <---PTRACE_SYSCALL-----<----+
+			 *
+			 * Linux 4.8+:
+			 * (seccomp-stop after syscall-entry-stop)
+			 *                 syscall-entry-stop
+			 *
+			 *         +---->-----PTRACE_CONT---->----+
+			 *         |                              |
+			 *  syscall-exit-stop               seccomp-stop
+			 *         |                              |
+			 *         +----<----PTRACE_SYSCALL---<---+
+			 *
+			 * Note in Linux 4.8+, we restart in PTRACE_CONT
+			 * after syscall-exit to skip the syscall-entry-stop.
+			 * The next seccomp-stop will be treated as a syscall
+			 * entry.
+			 *
+			 * The line below implements this behavior.
+			 * Note that exiting(current_tcp) actually marks
+			 * a syscall-entry-stop because the flag was inverted
+			 * in the above call to trace_syscall.
+			 */
+			restart_op = exiting(current_tcp) ? PTRACE_SYSCALL : PTRACE_CONT;
 		}
 		break;
 
@@ -2498,7 +2860,7 @@ dispatch_event(const struct tcb_wait_data *wd)
 		 * and all the following syscall state tracking is screwed up
 		 * otherwise.
 		 */
-		if (entering(current_tcp)) {
+		if (!maybe_switch_current_tcp() && entering(current_tcp)) {
 			int ret;
 
 			error_msg("Stray PTRACE_EVENT_EXEC from pid %d"
@@ -2514,25 +2876,6 @@ dispatch_event(const struct tcb_wait_data *wd)
 				return true;
 			}
 		}
-
-		/*
-		 * Under Linux, execve changes pid to thread leader's pid,
-		 * and we see this changed pid on EVENT_EXEC and later,
-		 * execve sysexit. Leader "disappears" without exit
-		 * notification. Let user know that, drop leader's tcb,
-		 * and fix up pid in execve thread's tcb.
-		 * Effectively, execve thread's tcb replaces leader's tcb.
-		 *
-		 * BTW, leader is 'stuck undead' (doesn't report WIFEXITED
-		 * on exit syscall) in multithreaded programs exactly
-		 * in order to handle this case.
-		 *
-		 * PTRACE_GETEVENTMSG returns old pid starting from Linux 3.0.
-		 * On 2.6 and earlier, it can return garbage.
-		 */
-		if (os_release >= KERNEL_VERSION(3, 0, 0))
-			set_current_tcp(maybe_switch_tcbs(current_tcp,
-							  current_tcp->pid));
 
 		if (detach_on_execve) {
 			if (current_tcp->flags & TCB_SKIP_DETACH_ON_FIRST_EXEC) {
@@ -2554,8 +2897,15 @@ dispatch_event(const struct tcb_wait_data *wd)
 		return false;
 
 	/* If the process is being delayed, do not ptrace_restart just yet */
-	if (syscall_delayed(current_tcp))
+	if (syscall_delayed(current_tcp)) {
+		if (current_tcp->delayed_wait_data)
+			error_func_msg("pid %d has delayed wait data set"
+				       " already", current_tcp->pid);
+
+		current_tcp->delayed_wait_data = copy_trace_wait_data(wd);
+
 		return true;
+	}
 
 	if (ptrace_restart(restart_op, current_tcp, restart_sig) < 0) {
 		/* Note: ptrace_restart emitted error message */
@@ -2568,7 +2918,15 @@ dispatch_event(const struct tcb_wait_data *wd)
 static bool
 restart_delayed_tcb(struct tcb *const tcp)
 {
-	const struct tcb_wait_data wd = { .te = TE_RESTART };
+	struct tcb_wait_data *wd = tcp->delayed_wait_data;
+
+	if (!wd) {
+		error_func_msg("No delayed wait data found for pid %d",
+			       tcp->pid);
+		wd = init_trace_wait_data(alloca(trace_wait_data_size(tcp)));
+	}
+
+	wd->te = TE_RESTART;
 
 	debug_func_msg("pid %d", tcp->pid);
 
@@ -2576,8 +2934,11 @@ restart_delayed_tcb(struct tcb *const tcp)
 
 	struct tcb *const prev_tcp = current_tcp;
 	current_tcp = tcp;
-	bool ret = dispatch_event(&wd);
+	bool ret = dispatch_event(wd);
 	current_tcp = prev_tcp;
+
+	free_trace_wait_data(tcp->delayed_wait_data);
+	tcp->delayed_wait_data = NULL;
 
 	return ret;
 }
@@ -2635,14 +2996,12 @@ timer_sighandler(int sig)
 	errno = saved_errno;
 }
 
-#ifdef ENABLE_COVERAGE_GCOV
-extern void __gcov_flush(void);
-#endif
-
 static void ATTRIBUTE_NORETURN
 terminate(void)
 {
-	cleanup();
+	int sig = interrupted;
+
+	cleanup(sig);
 	if (cflag)
 		call_summary(shared_log);
 	fflush(NULL);
@@ -2652,8 +3011,8 @@ terminate(void)
 		while (waitpid(popen_pid, NULL, 0) < 0 && errno == EINTR)
 			;
 	}
-	if (interrupted) {
-		exit_code = 0x100 | interrupted;
+	if (sig) {
+		exit_code = 0x100 | sig;
 	}
 	if (exit_code > 0xff) {
 		/* Avoid potential core file clobbering.  */
@@ -2663,18 +3022,14 @@ terminate(void)
 		/* Child was killed by a signal, mimic that.  */
 		exit_code &= 0xff;
 		signal(exit_code, SIG_DFL);
-#ifdef ENABLE_COVERAGE_GCOV
-		__gcov_flush();
-#endif
+		GCOV_DUMP;
 		raise(exit_code);
 
 		/* Unblock the signal.  */
 		sigset_t mask;
 		sigemptyset(&mask);
 		sigaddset(&mask, exit_code);
-#ifdef ENABLE_COVERAGE_GCOV
-		__gcov_flush();
-#endif
+		GCOV_DUMP;
 		sigprocmask(SIG_UNBLOCK, &mask, NULL);
 
 		/* Paranoia - what if this signal is not fatal?
