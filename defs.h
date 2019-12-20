@@ -256,13 +256,24 @@ struct fuse_fdcontext_entry {
 	unsigned fd_status;
 };
 
+struct iogroup_fdcontext_entry {
+	unsigned group;
+};
+
 struct fdcontext_entry {
 	struct fuse_fdcontext_entry fuse_fdcontext_entry;
+	struct iogroup_fdcontext_entry iogroup_fdcontext_entry;
 	bool extant;
+};
+
+struct iogroup_fdcontext {
+	unsigned group_max;
+	bool enabled;
 };
 
 struct fdcontext {
 	struct fdcontext_entry *entries;
+	struct iogroup_fdcontext iogroup_fdcontext;
 	int tgid;
 	int fd_maxplus;
 	int len;
@@ -1566,4 +1577,7 @@ extern void fdcontext_drop(struct tcb *);
 extern bool fdcontext_get_entry(struct tcb *, int, struct fdcontext_entry **);
 extern void fdcontext_del_entry(struct tcb *, int);
 extern void fdcontext_cleanup(struct tcb *);
+
+extern void fdcontext_iogroup_init(struct tcb *, bool);
+extern void fdcontext_iogroup_hook(struct tcb *, bool);
 #endif /* !STRACE_DEFS_H */

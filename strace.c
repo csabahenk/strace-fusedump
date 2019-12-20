@@ -772,6 +772,7 @@ alloctcb(int pid)
 #endif
 			nprocs++;
 			fdcontext_link(tcp);
+			fdcontext_iogroup_init(tcp, fuse_dumpfd >= 0);
 			debug_msg("new tcb for pid %d, active tcbs:%d",
 				  tcp->pid, nprocs);
 			return tcp;

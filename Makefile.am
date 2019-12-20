@@ -117,6 +117,7 @@ strace_SOURCES =	\
 	fchownat.c	\
 	fcntl.c		\
 	fdcontext.c	\
+	fdcontext_iogroup.c \
 	fetch_bpf_fprog.c \
 	fetch_struct_flock.c \
 	fetch_struct_keyctl_kdf_params.c \

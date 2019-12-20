@@ -785,6 +785,7 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
 	tcp->s_prev_ent = tcp->s_ent;
 
 	int sys_res = 0;
+	bool is_rval_fd = false;
 	if (raw(tcp)) {
 		/* sys_res = printargs(tcp); - but it's nop on sysexit */
 	} else {
@@ -912,6 +913,7 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
 				}
 				break;
 			case RVAL_FD:
+				is_rval_fd = true;
 				if (show_fd_path) {
 					tprints("= ");
 					printfd(tcp, tcp->u_rval);
@@ -936,6 +938,7 @@ syscall_exiting_trace(struct tcb *tcp, struct timespec *ts, int res)
 	tprints("\n");
 	dumpio(tcp);
 	fdcontext_cleanup(tcp);
+	fdcontext_iogroup_hook(tcp, is_rval_fd);
 	dumpio_fuse(tcp);
 	line_ended();
 

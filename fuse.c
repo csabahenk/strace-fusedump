@@ -25,14 +25,33 @@ fuse_initdumpbuf(size_t size)
 	}
 }
 
+static enum fuse_fd_status
+fuse_status(struct tcb *tcp, struct fuse_fdcontext_entry *ffdxe, int fd)
+{
+	if (ffdxe->fd_status == FD_FUSE_UNSET) {
+		struct stat st;
+		char ppath[128];
+		int rv;
+
+		snprintf(ppath, sizeof(ppath), "/proc/%d/fd/%d", tcp->pid, fd);
+		rv = stat(ppath, &st);
+
+		ffdxe->fd_status = (rv == 0 &&
+				    st.st_rdev == 0xae5 /* makedev(10, 229) */ ) ?
+				   FD_FUSE_YES : FD_FUSE_NO;
+	}
+
+	return ffdxe->fd_status;
+}
+
 static bool
 fuse_check(struct tcb *tcp, int fd, enum existence_spec extant)
 {
-	struct stat st;
-	char ppath[128];
-	int rv;
+	struct fdcontext *fdx;
 	struct fdcontext_entry *fdxe;
 	struct fuse_fdcontext_entry *ffdxe;
+	struct iogroup_fdcontext_entry *ifdxe;
+	int i;
 
 	fdcontext_get_entry(tcp, fd, &fdxe);
 	ffdxe = &fdxe->fuse_fdcontext_entry;
@@ -42,15 +61,21 @@ fuse_check(struct tcb *tcp, int fd, enum existence_spec extant)
 			"of fd %d: fuse fd existence spec: %d, status: %d",
 			__func__,  tcp_sysent(tcp)->sys_name, fd, extant,
 			ffdxe->fd_status);
-	if (ffdxe->fd_status == FD_FUSE_UNSET) {
-		snprintf(ppath, sizeof(ppath), "/proc/%d/fd/%d", tcp->pid, fd);
-		rv = stat(ppath, &st);
+	if (fuse_status(tcp, ffdxe, fd) == FD_FUSE_YES)
+		return true;
 
-		ffdxe->fd_status = (rv == 0 &&
-				    st.st_rdev == 0xae5 /* makedev(10, 229) */ ) ?
-				   FD_FUSE_YES : FD_FUSE_NO;
+	ifdxe = &fdxe->iogroup_fdcontext_entry;
+	if (!ifdxe->group)
+		return false;
+
+	fdx = fdcontext(tcp);
+	for (i = 0; i < fdx->fd_maxplus; i++) {
+		if (fdx->entries[i].iogroup_fdcontext_entry.group == ifdxe->group &&
+		    fuse_status(tcp, &fdx->entries[i].fuse_fdcontext_entry, i) == FD_FUSE_YES)
+			return true;
 	}
-	return ffdxe->fd_status == FD_FUSE_YES;
+
+	return false;
 }
 
 struct fusedump_timespec {
