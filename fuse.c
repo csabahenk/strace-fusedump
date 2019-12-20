@@ -1,6 +1,7 @@
 #include "defs.h"
 #include <sys/stat.h>
 #include <sys/uio.h>
+#include "syscall.h"
 
 int fuse_dumpfd = -1;
 static char *fuse_dumpbuf = NULL;
@@ -24,7 +25,7 @@ fuse_initdumpbuf(size_t size)
 	}
 }
 
-bool
+static bool
 fuse_check(struct tcb *tcp, int fd, enum existence_spec extant)
 {
 	struct stat st;
@@ -74,7 +75,7 @@ fusedump_gettime (struct fusedump_timespec *fts)
 	fts->nsec = ts.tv_nsec;
 }
 
-void
+static void
 fuse_printmark(struct tcb *tcp, char mark)
 {
 	char signature[] = {'S', 'T', 'R', 'A', 0xCE};
@@ -99,7 +100,7 @@ fuse_printmark(struct tcb *tcp, char mark)
 				  strerror(errno));
 }
 
-void
+static void
 fuse_dumpio(struct tcb *tcp, kernel_ulong_t addr, size_t size)
 {
 	fuse_initdumpbuf(size);
@@ -110,4 +111,54 @@ fuse_dumpio(struct tcb *tcp, kernel_ulong_t addr, size_t size)
 	if (write(fuse_dumpfd, fuse_dumpbuf, size) != (ssize_t)size)
 		error_msg_and_die("cannot write to fuse dumpfile: %s",
 				  strerror(errno));
+}
+
+void
+dumpio_fuse(struct tcb *tcp)
+{
+	int fd;
+	enum existence_spec extant;
+
+	if (syserror(tcp) || fuse_dumpfd == -1)
+		return;
+
+	switch (tcp_sysent(tcp)->sen) {
+	case SEN_open:
+	case SEN_openat:
+		fd = tcp->u_rval;
+		extant = IT_ISNT;
+		break;
+	case SEN_read:
+	case SEN_write:
+	case SEN_readv:
+	case SEN_writev:
+		fd = tcp->u_arg[0];
+		extant = IT_UNCERTAIN;
+		break;
+	default:
+		return;
+	}
+	if (!fuse_check(tcp, fd, extant))
+		return;
+
+	switch (tcp_sysent(tcp)->sen) {
+	case SEN_read:
+		fuse_printmark(tcp, 'R');
+		fuse_dumpio(tcp, tcp->u_arg[1], tcp->u_rval);
+		break;
+	case SEN_write:
+		fuse_printmark(tcp, 'W');
+		fuse_dumpio(tcp, tcp->u_arg[1], tcp->u_arg[2]);
+		break;
+	case SEN_readv:
+		fuse_printmark(tcp, 'R');
+		dumpiov_upto_cbk(tcp, tcp->u_arg[2], tcp->u_arg[1],
+			         tcp->u_rval, false,  fuse_dumpio);
+		break;
+	case SEN_writev:
+		fuse_printmark(tcp, 'W');
+		dumpiov_upto_cbk(tcp, tcp->u_arg[2], tcp->u_arg[1],
+			         -1, false, fuse_dumpio);
+		break;
+	}
 }

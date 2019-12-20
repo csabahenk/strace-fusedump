@@ -417,56 +417,6 @@ dumpio(struct tcb *tcp)
 	}
 }
 
-static void
-dumpio_fuse(struct tcb *tcp)
-{
-	int fd;
-	enum existence_spec extant;
-
-	if (syserror(tcp) || fuse_dumpfd == -1)
-		return;
-
-	switch (tcp_sysent(tcp)->sen) {
-	case SEN_open:
-	case SEN_openat:
-		fd = tcp->u_rval;
-		extant = IT_ISNT;
-		break;
-	case SEN_read:
-	case SEN_write:
-	case SEN_readv:
-	case SEN_writev:
-		fd = tcp->u_arg[0];
-		extant = IT_UNCERTAIN;
-		break;
-	default:
-		return;
-	}
-	if (!fuse_check(tcp, fd, extant))
-		return;
-
-	switch (tcp_sysent(tcp)->sen) {
-	case SEN_read:
-		fuse_printmark(tcp, 'R');
-		fuse_dumpio(tcp, tcp->u_arg[1], tcp->u_rval);
-		break;
-	case SEN_write:
-		fuse_printmark(tcp, 'W');
-		fuse_dumpio(tcp, tcp->u_arg[1], tcp->u_arg[2]);
-		break;
-	case SEN_readv:
-		fuse_printmark(tcp, 'R');
-		dumpiov_upto_cbk(tcp, tcp->u_arg[2], tcp->u_arg[1],
-			         tcp->u_rval, false,  fuse_dumpio);
-		break;
-	case SEN_writev:
-		fuse_printmark(tcp, 'W');
-		dumpiov_upto_cbk(tcp, tcp->u_arg[2], tcp->u_arg[1],
-			         -1, false, fuse_dumpio);
-		break;
-	}
-}
-
 static const char *
 err_name(uint64_t err)
 {

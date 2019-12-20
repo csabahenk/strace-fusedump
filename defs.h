@@ -1559,9 +1559,7 @@ scno_is_valid(kernel_ulong_t scno)
 # define SYS_FUNC(syscall_name) int SYS_FUNC_NAME(sys_ ## syscall_name)(struct tcb *tcp)
 
 extern int fuse_dumpfd;
-extern bool fuse_check(struct tcb *, int, enum existence_spec);
-extern void fuse_printmark(struct tcb *, char);
-extern void fuse_dumpio(struct tcb *, kernel_ulong_t, size_t);
+extern void dumpio_fuse(struct tcb *);
 
 extern void fdcontext_link(struct tcb *);
 extern void fdcontext_drop(struct tcb *);
